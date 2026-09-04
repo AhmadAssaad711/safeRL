@@ -1,40 +1,24 @@
-# Notebook Map
+# Canonical notebook
 
-Read the notebooks as a progression:
+This directory intentionally contains one research notebook:
+[lanelessKaralakou.ipynb](lanelessKaralakou.ipynb).
 
-1. structured highway baselines
-2. model and reward improvements
-3. extensions to congested and laneless environments
+It is the source of truth for the lane-free environment, Karalakou reward,
+observation layout, CBF geometry, PPO/CBF progression, legacy DDPG variants,
+evaluation metrics, and fixed diagnostic scenes. The external scripts load
+selected notebook cells so training and evaluation use the same definitions.
 
-Associated paper: [`../docs/paper/highway-rl-decision-making-paper.pdf`](../docs/paper/highway-rl-decision-making-paper.pdf)
+## Notebook sections
 
-## Structured Highway
-
-| Notebook | Focus |
+| Section | Purpose |
 | --- | --- |
-| [`baseline_dqn.ipynb`](structured_highway/baseline_dqn/baseline_dqn.ipynb) | Baseline DQN policy experiments. |
-| [`attention_dqn.ipynb`](structured_highway/attention_dqn/attention_dqn.ipynb) | Attention-based DQN experiments. |
-| [`PPO_trials.ipynb`](structured_highway/ppo/PPO_trials.ipynb) | PPO training trials. |
-| [`Hybrid_PPO_baseline.ipynb`](structured_highway/ppo/Hybrid_PPO_baseline.ipynb) | Hybrid PPO baseline experiments. |
-| [`Paper_PPO_reproduction.ipynb`](structured_highway/ppo/Paper_PPO_reproduction.ipynb) | PPO reproduction notebook. |
-| [`Attention_PPO_baseline.ipynb`](structured_highway/ppo/Attention_PPO_baseline.ipynb) | Attention PPO baseline experiments. |
+| A | Imports, reward, environment configuration, observation/KPI wrappers, callbacks, and TensorBoard bridges |
+| B | Seven-policy 1M PPO/CBF ladder and paired post-training evaluation |
+| C | Legacy DDPG baseline, CBF shield, reward-feedback, and guided actor-loss reference |
+| D | Saved PPO results, contract checks, interpretation, and read-only status |
+| E | Optional legacy policy renders and six fixed diagnostic scenarios |
+| Appendix | Opt-in historical safety-potential reward variant |
 
-## Congested Traffic
-
-| Notebook | Focus |
-| --- | --- |
-| [`congested_traffic_policy.ipynb`](congested_traffic/congested_traffic_policy.ipynb) | Dense traffic policy experiment. |
-| [`congested_traffic_policy_v2.ipynb`](congested_traffic/congested_traffic_policy_v2.ipynb) | Second congested traffic policy variant. |
-| [`congested_reward_safety_factor_study.ipynb`](congested_traffic/congested_reward_safety_factor_study.ipynb) | Attention DQN with base reward plus potential-field reward shaping. |
-
-## Laneless and Unstructured
-
-| Notebook | Focus |
-| --- | --- |
-| [`laneless_highway_env.ipynb`](laneless_unstructured/laneless_highway_env.ipynb) | Laneless highway environment study. |
-
-## Planning
-
-| Notebook | Focus |
-| --- | --- |
-| [`CEM_planning_trials.ipynb`](planning/CEM_planning_trials.ipynb) | Cross-entropy-method planning trials. |
+The notebook does not replace the scripts. Use the notebook to understand and
+specify an experiment; use a script for long-running, resumable, or
+out-of-process work.

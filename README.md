@@ -1,92 +1,59 @@
-<div align="center">
+# safeRL
 
-# Highway RL Decision Making
+This repository contains the safe reinforcement-learning work for the
+laneless Karalakou lane-free highway environment.
 
-**Baselines, improvements, and extensions for structured, congested, and laneless highway environments.**
+The canonical source of truth is
+[lanelessKaralakou.ipynb](highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb).
+It defines the environment contract, Karalakou reward, CBF geometry, PPO
+progression, legacy DDPG comparisons, evaluation protocol, and artifact
+layout. The supporting Python runners in the scripts directory execute the
+same notebook definitions out of process when a long run should not occupy
+the notebook kernel.
 
-[Project Workspace](highway-rl-decision-making/) | [Notebook Map](highway-rl-decision-making/notebooks/) | [Paper](highway-rl-decision-making/docs/paper/highway-rl-decision-making-paper.pdf) | [Setup](#setup)
+## Start here
 
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
-![Notebook-first](https://img.shields.io/badge/Notebook--first-research-111111?style=flat-square)
-![RL](https://img.shields.io/badge/RL-highway_decision_making-0B7285?style=flat-square)
-![Paper](https://img.shields.io/badge/Paper-included-495057?style=flat-square)
+1. Install the dependencies from
+   [requirements.txt](highway-rl-decision-making/requirements.txt).
+2. Read the
+   [lanelessKaralakou reference](highway-rl-decision-making/docs/lanelessKaralakou_reference.md).
+3. Use the
+   [script and function reference](highway-rl-decision-making/docs/script_reference.md)
+   to choose a runner.
+4. Open the canonical notebook for the seven-policy PPO/CBF ladder and the
+   retained DDPG reference experiments.
 
-</div>
+The current research contract uses MTM surrounding traffic, 100 Hz physics,
+10 Hz policy actions, a 32D target-y plus previous-action PPO observation, and
+strict collision-free 1 km completion for evaluation.
 
----
+## Repository map
 
-## Focus
+| Path | Role |
+| --- | --- |
+| highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb | Canonical notebook and experiment specification |
+| highway-rl-decision-making/laneless highway env/ | lane-free-v0 environment and renderer |
+| highway-rl-decision-making/scripts/ | Training, CBF, evaluation, audit, plotting, and rendering runners |
+| highway-rl-decision-making/tests/ | Unit and protocol tests |
+| highway-rl-decision-making/docs/ | Experiment, scenario, and API documentation |
+| Root ppo_* directories | Committed safeRL result manifests and compact summaries |
 
-This repository presents work on high-level decision making for autonomous driving:
-
-- lane-based highway policies
-- dense traffic behavior
-- safety-aware reward design
-- laneless and unstructured highway environments
-- planning comparisons for decision-level behavior
-
-The repo is intentionally notebook-first. Each notebook captures a specific experiment, baseline, reproduction, or environment study.
-
-## Research Flow
-
-1. Establish baselines in structured highway environments.
-2. Improve those baselines with attention models, PPO variants, and reward-safety studies.
-3. Extend and test the ideas in harder settings: congested traffic and laneless highway environments.
-
-Associated paper: [`highway-rl-decision-making-paper.pdf`](highway-rl-decision-making/docs/paper/highway-rl-decision-making-paper.pdf)
-
-## Research Map
-
-| Area | Core Question | Entry Points |
-| --- | --- | --- |
-| Structured highway RL | Baseline DQN and PPO behavior in lane-based highway settings. | [`baseline_dqn`](highway-rl-decision-making/notebooks/structured_highway/baseline_dqn/baseline_dqn.ipynb), [`attention_dqn`](highway-rl-decision-making/notebooks/structured_highway/attention_dqn/attention_dqn.ipynb), [`PPO_trials`](highway-rl-decision-making/notebooks/structured_highway/ppo/PPO_trials.ipynb) |
-| Attention and hybrid PPO | Improvements over baseline policy structure. | [`Attention_PPO_baseline`](highway-rl-decision-making/notebooks/structured_highway/ppo/Attention_PPO_baseline.ipynb), [`Hybrid_PPO_baseline`](highway-rl-decision-making/notebooks/structured_highway/ppo/Hybrid_PPO_baseline.ipynb) |
-| Congested traffic | Baseline extensions under dense traffic and safety constraints. | [`congested_traffic_policy`](highway-rl-decision-making/notebooks/congested_traffic/congested_traffic_policy.ipynb), [`congested_traffic_policy_v2`](highway-rl-decision-making/notebooks/congested_traffic/congested_traffic_policy_v2.ipynb), [`potential_field_reward_test`](highway-rl-decision-making/notebooks/congested_traffic/congested_reward_safety_factor_study.ipynb) |
-| Laneless environments | Baseline extensions when lane assumptions break down. | [`laneless_highway_env`](highway-rl-decision-making/notebooks/laneless_unstructured/laneless_highway_env.ipynb) |
-| Planning comparison | How do planning-based methods compare as decision baselines? | [`CEM_planning_trials`](highway-rl-decision-making/notebooks/planning/CEM_planning_trials.ipynb) |
-
-## Repository Layout
-
-```text
-highway-rl-decision-making/
-  README.md
-  requirements.txt
-  docs/
-    paper/
-  notebooks/
-    structured_highway/
-    congested_traffic/
-    laneless_unstructured/
-    planning/
-```
-
-## What Is Included
-
-- clean notebook portfolio
-- associated paper
-- reproducible environment requirements
-- grouped experiments by research theme
-- public-facing structure around Highway RL Decision Making
-
-## What Is Excluded
-
-- unrelated practice problems
-- old experimental folders
-- vendored external repositories
-- generated logs, videos, checkpoints, and artifacts
-- material outside decision-level highway RL
+Lane-indexed highway notebooks, DQN implementations, unrelated planning
+experiments, machine-specific duplicate snapshots, scratch backups, and the
+old paper bundle were removed from this repository. The Git history still
+contains the prior state if an old reference is ever needed.
 
 ## Setup
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r highway-rl-decision-making\requirements.txt
-```
+    py -3.12 -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    python -m pip install --upgrade pip
+    python -m pip install -r highway-rl-decision-making\requirements.txt
 
-Then open the notebooks from:
+For environment-only smoke testing:
 
-```text
-highway-rl-decision-making/notebooks/
-```
+    Set-Location highway-rl-decision-making
+    python scripts\mtm_laneless_smoke.py --help
+
+Do not run the full 1M-transition ladder accidentally. The notebook's shared
+launcher and the script CLI should be checked before enabling training.

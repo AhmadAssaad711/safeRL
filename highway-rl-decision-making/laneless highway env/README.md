@@ -6,6 +6,14 @@ The environment is implemented in `lane_free_env.py` and registers as `lane-free
 
 It intentionally has no lane indices, lane centers, target lanes, lane-change actions, or `DiscreteMetaAction`.
 
+The benchmark configuration used by the safeRL work is defined by
+[notebooks/lanelessKaralakou.ipynb](../notebooks/lanelessKaralakou.ipynb). For the
+cell order, PPO/DDPG variants, CBF contract, KPI definitions, and script
+responsibilities, see [docs/lanelessKaralakou_reference.md](../docs/lanelessKaralakou_reference.md)
+and [docs/script_reference.md](../docs/script_reference.md). The defaults below
+describe the reusable environment itself and are not a substitute for the
+notebook benchmark configuration.
+
 ## Files
 
 - `lane_free_env.py` defines `LaneFreeTrafficEnv`, `LaneFreeVehicle`, Gymnasium registration, and the small runtime renderer extension needed for a lane-free road surface

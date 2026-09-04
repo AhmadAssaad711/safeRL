@@ -1,61 +1,52 @@
-# Highway RL Decision Making
+# safeRL laneless Karalakou workspace
 
-Notebook and paper workspace for reinforcement-learning experiments in autonomous highway decision making.
+This is the implementation workspace for safe reinforcement learning in the
+lane-free highway environment. The canonical experiment specification is
+[notebooks/lanelessKaralakou.ipynb](notebooks/lanelessKaralakou.ipynb).
 
 ## Scope
 
-This work focuses on decision-level behavior:
+The retained code covers:
 
-- structured highway policies
-- congestion-aware decision making
-- reward and safety-factor studies
-- laneless and unstructured highway environments
-- planning baselines for comparison
+- the lane-free-v0 Gymnasium environment and MTM surrounding traffic;
+- the Karalakou reward and target-y observation contract;
+- hard HOCBF filtering and two-dimensional action projection;
+- PPO progression, differentiable projection, detached actor guidance, and
+  the legacy DDPG baselines;
+- strict evaluation, KPI aggregation, common-state counterfactuals,
+  parameter pilots, density audits, plots, and policy renders.
 
-## Research Flow
+## Documentation
 
-1. Establish baselines in structured highway environments.
-2. Improve the baselines with attention models, PPO variants, and reward-safety studies.
-3. Extend and evaluate the approach in unstructured settings: congested traffic and laneless highways.
+- [Canonical notebook reference](docs/lanelessKaralakou_reference.md)
+- [Script and function reference](docs/script_reference.md)
+- [Diagnostic scenario registry](docs/diagnostic_scenarios.md)
+- [CBF factorial ablation](docs/cbf_factorial_ablation.md)
+- [Nominal DDPG handoff](docs/nominal_ddpg_confirmation_handoff.md)
+- [Nominal PPO handoff](docs/nominal_ppo_50k_pilot_handoff.md)
 
-Paper: [`docs/paper/highway-rl-decision-making-paper.pdf`](docs/paper/highway-rl-decision-making-paper.pdf)
+## Quick commands
 
-## Notebooks
+From this directory:
 
-| Folder | Purpose |
-| --- | --- |
-| [`structured_highway/`](notebooks/structured_highway/) | DQN, attention DQN, PPO, hybrid PPO, and reproduction notebooks. |
-| [`congested_traffic/`](notebooks/congested_traffic/) | Dense traffic policy experiments and reward-safety studies. |
-| [`laneless_unstructured/`](notebooks/laneless_unstructured/) | Laneless highway environment experiments. |
-| [`planning/`](notebooks/planning/) | CEM planning trials used as decision-level comparisons. |
+    python scripts\mtm_laneless_smoke.py --help
+    python scripts\evaluate_laneless_karalakou.py --help
+    python scripts\run_ppo_cbf_progression.py --help
+    python scripts\render_laneless_karalakou.py --help
 
-Full notebook list: [`notebooks/README.md`](notebooks/README.md)
+The long-running commands require an explicit output directory and should be
+launched only after confirming the selected model, seed, traffic model, and
+evaluation budget.
 
-CBF reward-by-actor-loss study: [`docs/cbf_factorial_ablation.md`](docs/cbf_factorial_ablation.md)
+## Layout
 
-Diagnostic scenario registry: [`docs/diagnostic_scenarios.md`](docs/diagnostic_scenarios.md)
+    configs/                 Reusable MTM live configuration
+    docs/                    SafeRL experiment and API documentation
+    laneless highway env/   lane-free-v0 implementation and demo
+    notebooks/              Canonical lanelessKaralakou notebook
+    scripts/                Training/evaluation/analysis entry points
+    tests/                  Unit and protocol tests
 
-## Install
-
-```powershell
-py -3.12 -m pip install -r requirements.txt
-```
-
-## Exact PPO/DDPG baseline comparison
-
-To compare the two algorithms before changing the reward or safety design,
-run the frozen nominal P0/Q0 formulation:
-
-```powershell
-python scripts\compare_nominal_ppo_ddpg.py
-```
-
-The runner uses PPO `Q0_current_aligned` and DDPG `P0_current` with the same
-environment, 42-D observation, normalized acceleration action, reciprocal
-reward, collision protocol, training seed, and fixed evaluation seeds. It
-writes `final_comparison.csv`, `checkpoint_comparison.csv`, and the shared
-formulation manifest under `artifacts\ppo_ddpg_exact_p0`.
-
-## Notes
-
-This public version keeps the notebooks and associated paper. Generated outputs, source scripts, old practice work, and vendor copies are intentionally excluded.
+Generated models, event logs, videos, plots, and new result folders are
+ignored by Git. Existing root ppo_* directories are compact committed
+safeRL result manifests retained for provenance.
