@@ -4,7 +4,7 @@ This repository contains the safe reinforcement-learning work for the
 laneless Karalakou lane-free highway environment.
 
 The canonical source of truth is
-[lanelessKaralakou.ipynb](highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb).
+[lanelessKaralakou.ipynb](safeRL_workspace/notebooks/lanelessKaralakou.ipynb).
 It defines the environment contract, Karalakou reward, CBF geometry, PPO
 progression, legacy DDPG comparisons, evaluation protocol, and artifact
 layout. The supporting Python runners in the organized scripts package execute the
@@ -14,11 +14,11 @@ the notebook kernel.
 ## Start here
 
 1. Install the dependencies from
-   [requirements.txt](highway-rl-decision-making/requirements.txt).
+   [requirements.txt](safeRL_workspace/requirements.txt).
 2. Read the
-   [lanelessKaralakou reference](highway-rl-decision-making/docs/lanelessKaralakou_reference.md).
+   [lanelessKaralakou reference](safeRL_workspace/docs/lanelessKaralakou_reference.md).
 3. Use the
-   [script and function reference](highway-rl-decision-making/docs/script_reference.md)
+   [script and function reference](safeRL_workspace/docs/script_reference.md)
    to choose a runner.
 4. Open the canonical notebook for the seven-policy PPO/CBF ladder and the
    retained DDPG reference experiments.
@@ -33,9 +33,9 @@ strict collision-free 1 km completion for evaluation.
 | --- | --- |
 | highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb | Canonical notebook and experiment specification |
 | highway-rl-decision-making/laneless highway env/ | lane-free-v0 environment and renderer |
-| [highway-rl-decision-making/scripts/](highway-rl-decision-making/scripts/README.md) | Organized common, training, evaluation, reporting, rendering, and ops modules |
-| [highway-rl-decision-making/tests/](highway-rl-decision-making/tests/README.md) | Unit and protocol tests with shared pytest setup |
-| [highway-rl-decision-making/docs/](highway-rl-decision-making/docs/README.md) | Experiment, scenario, and script/function documentation |
+| [highway-rl-decision-making/scripts/](safeRL_workspace/scripts/README.md) | Organized common, training, evaluation, reporting, rendering, and ops modules |
+| [highway-rl-decision-making/tests/](safeRL_workspace/tests/README.md) | Unit and protocol tests with shared pytest setup |
+| [highway-rl-decision-making/docs/](safeRL_workspace/docs/README.md) | Experiment, scenario, and script/function documentation |
 | artifacts/ppo_* directories | Committed safeRL result manifests and compact summaries |
 
 Lane-indexed highway notebooks, DQN implementations, unrelated planning

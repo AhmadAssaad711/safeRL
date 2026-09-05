@@ -59,7 +59,7 @@ def find_project_root(start: Path) -> Path:
     for candidate in [start.resolve(), *start.resolve().parents]:
         if (candidate / "notebooks" / "lanelessKaralakou.ipynb").exists():
             return candidate
-        nested = candidate / "highway-rl-decision-making"
+        nested = candidate / "safeRL_workspace"
         if (nested / "notebooks" / "lanelessKaralakou.ipynb").exists():
             return nested
     raise RuntimeError("Could not find project root containing notebooks/lanelessKaralakou.ipynb")

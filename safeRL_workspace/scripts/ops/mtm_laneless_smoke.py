@@ -21,7 +21,7 @@ def find_project_root(start: Path) -> Path:
         env_file = candidate / "laneless highway env" / "lane_free_env.py"
         if env_file.exists():
             return candidate
-        nested = candidate / "highway-rl-decision-making"
+        nested = candidate / "safeRL_workspace"
         if (nested / "laneless highway env" / "lane_free_env.py").exists():
             return nested
     raise RuntimeError("Could not find project root containing laneless highway env/lane_free_env.py")
