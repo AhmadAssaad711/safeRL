@@ -2,8 +2,9 @@
 
 This document describes the retained safeRL system as implemented by
 notebooks/lanelessKaralakou.ipynb. The notebook is the source of truth for
-the environment and reward definitions. The Python files in scripts/ are
-operational entry points that load selected notebook cells and add
+the environment and reward definitions. The package layout in
+[scripts/README.md](../scripts/README.md) groups operational entry points by
+role; those modules load selected notebook cells and add
 resumability, parallelism, validation, or reporting.
 
 ## Research scope
@@ -223,7 +224,7 @@ recompute the shield at all ten simulator substeps.
 ## Evaluation and KPI protocol
 
 The standard ten KPI fields are defined in
-scripts/evaluate_laneless_karalakou.py:
+scripts/evaluation/evaluate_laneless_karalakou.py:
 
 | Display name | CSV field |
 | --- | --- |
@@ -296,21 +297,21 @@ configuration and hashes for provenance, not the absolute path.
 ### Environment smoke test
 
     Set-Location highway-rl-decision-making
-    python scripts\mtm_laneless_smoke.py --run-dir <source-run> --output-dir <output>
+    python -m scripts.ops.mtm_laneless_smoke --run-dir <source-run> --output-dir <output>
 
 The smoke runner compares force and MTM surrounding traffic without launching
 an RL learner.
 
 ### Nominal PPO pilot
 
-    python scripts\run_nominal_ppo_parameter_pilot.py --help
+    python -m scripts.training.run_nominal_ppo_parameter_pilot --help
 
 This screens Q0_current_aligned, Q1_stable, Q2_exploratory, and
 Q3_conservative_update while keeping the lane-free task and reward fixed.
 
 ### PPO progression
 
-    python scripts\run_ppo_cbf_progression.py --help
+    python -m scripts.training.run_ppo_cbf_progression --help
 
 Use an explicit output directory. The runner verifies training signatures,
 checkpoint completeness, evaluation coverage, and post-training summaries
@@ -318,9 +319,9 @@ before reusing an existing run.
 
 ### Factorial CBF study
 
-    python scripts\run_cbf_filter_ablation.py --help
-    python scripts\evaluate_cbf_counterfactuals.py --help
-    python scripts\build_cbf_ablation_report.py --help
+    python -m scripts.training.run_cbf_filter_ablation --help
+    python -m scripts.evaluation.evaluate_cbf_counterfactuals --help
+    python -m scripts.reporting.build_cbf_ablation_report --help
 
 This separates policy occupancy effects from same-state action-map effects.
 Read diagnostic_scenarios.md before changing the scenario or state-bank
@@ -328,9 +329,9 @@ protocol.
 
 ### Rendering
 
-    python scripts\render_laneless_karalakou.py --help
-    python scripts\render_laneless_policy_scenario.py --help
-    python scripts\render_laneless_policy_videos.py --help
+    python -m scripts.rendering.render_laneless_karalakou --help
+    python -m scripts.rendering.render_laneless_policy_scenario --help
+    python -m scripts.rendering.render_laneless_policy_videos --help
 
 Rendering consumes saved models and should be run after selecting the traffic
 profile, CBF mode, and artifact suffix explicitly.

@@ -6,6 +6,10 @@ canonical laneless Karalakou experiment. The source-of-truth notebook is
 script inventory below describes how each module consumes or extends that
 notebook.
 
+The executable modules are organized by role in
+[scripts/README.md](../scripts/README.md). Use the package-qualified commands
+below so imports and project-root paths remain consistent.
+
 The notebook owns the environment construction, reward definitions, CBF
 geometry, baseline DDPG implementation, PPO training definitions, and the
 canonical evaluation contract. Scripts are orchestration, experiment, audit,
@@ -31,9 +35,9 @@ The normal execution order is:
 Run commands from the highway-rl-decision-making directory. Most scripts accept
 --help before importing optional training dependencies.
 
-    python scripts\mtm_laneless_smoke.py --help
-    python scripts\evaluate_laneless_karalakou.py --help
-    python scripts\run_ppo_cbf_progression.py --help
+    python -m scripts.ops.mtm_laneless_smoke --help
+    python -m scripts.evaluation.evaluate_laneless_karalakou --help
+    python -m scripts.training.run_ppo_cbf_progression --help
 
 Do not launch the one-million-step PPO ladder merely to inspect a script. The
 notebook's B.0 launch cell contains the long-run training guard; inspect the
@@ -44,15 +48,15 @@ configuration and use the smoke or evaluation entry points first.
 | Layer | Main modules | Responsibility |
 | --- | --- | --- |
 | Canonical experiment | notebooks/lanelessKaralakou.ipynb | Environment, reward, CBF, DDPG, PPO, and evaluation definitions |
-| Notebook bridge | run_laneless_notebook_task.py, evaluate_laneless_karalakou.py, render_laneless_karalakou.py | Execute selected notebook cells with controlled overrides |
-| Environment and observations | laneless_script_config.py, ppo_observation_variants.py, ppo_parallel_worker.py, ppo_cbf_env.py | Rebuild the canonical spaces and worker-safe observation/context wrappers |
-| Safety projection | cbf_projection.py, cbf_ray_mask.py, guided_cbf_minimal.py | Convert CBF inequalities into safe physical actions and robust fallback actions |
-| PPO methods | projected_ppo_cbf.py, run_ppo_cbf_progression.py, run_ppo_formulation_screen.py | Train and compare raw, detached, projected, and context-aware policies |
-| DDPG methods | train_ddpg_*.py, ddpg_cbf_*.py, retrain_ddpg_stepwise_comparison.py | Train, sweep, and compare the legacy DDPG baselines and CBF variants |
-| Protocol runners | run_nominal_ppo_parameter_pilot.py, run_nominal_ddpg_parameter_pilot.py, run_cbf_filter_ablation.py | Reproducible multi-seed training, checkpoints, paired evaluation, and factorial studies |
-| Evaluation and audits | evaluate_*.py, audit_*.py, diagnose_update_signal_pipeline.py, compare_nominal_ppo_ddpg.py | Measure safety, task performance, interventions, geometry, and learning signals |
-| Plotting and reporting | plot_*.py, build_*.py | Turn TensorBoard, CSV, JSON, and evaluation records into figures and reports |
-| Live inspection | run_*_live.py, render_*.py | Short interactive rollouts and annotated videos; not the source of benchmark numbers |
+| Notebook bridge | `training/run_laneless_notebook_task.py`, `evaluation/evaluate_laneless_karalakou.py`, `rendering/render_laneless_karalakou.py` | Execute selected notebook cells with controlled overrides |
+| Environment and observations | `common/laneless_script_config.py`, `common/ppo_observation_variants.py`, `common/ppo_parallel_worker.py`, `common/ppo_cbf_env.py` | Rebuild the canonical spaces and worker-safe observation/context wrappers |
+| Safety projection | `common/cbf_projection.py`, `common/cbf_ray_mask.py`, `common/guided_cbf_minimal.py` | Convert CBF inequalities into safe physical actions and robust fallback actions |
+| PPO methods | `common/projected_ppo_cbf.py`, `training/run_ppo_cbf_progression.py`, `training/run_ppo_formulation_screen.py` | Train and compare raw, detached, projected, and context-aware policies |
+| DDPG methods | `training/train_ddpg_*.py`, `training/ddpg_cbf_*.py`, `training/retrain_ddpg_stepwise_comparison.py` | Train, sweep, and compare the legacy DDPG baselines and CBF variants |
+| Protocol runners | `training/run_nominal_ppo_parameter_pilot.py`, `training/run_nominal_ddpg_parameter_pilot.py`, `training/run_cbf_filter_ablation.py` | Reproducible multi-seed training, checkpoints, paired evaluation, and factorial studies |
+| Evaluation and audits | `evaluation/evaluate_*.py`, `evaluation/audit_*.py`, `evaluation/diagnose_update_signal_pipeline.py`, `evaluation/compare_nominal_ppo_ddpg.py` | Measure safety, task performance, interventions, geometry, and learning signals |
+| Plotting and reporting | `reporting/plot_*.py`, `reporting/build_*.py` | Turn TensorBoard, CSV, JSON, and evaluation records into figures and reports |
+| Live inspection | `ops/run_*_live.py`, `rendering/render_*.py` | Short interactive rollouts and annotated videos; not the source of benchmark numbers |
 
 ## Canonical notebook contract
 
@@ -327,17 +331,17 @@ This module contains the minimal guided-learning extension for DDPG.
 
 | Script | Main functions and purpose |
 | --- | --- |
-| [train_cbf_damped_gain.py](../scripts/train_cbf_damped_gain.py) | set_cbf_gains and set_vec_cbf_gains apply gain overrides; make_eval_env builds the evaluation wrapper; evaluate_model and summarize measure the damped-gain candidate; DampedGainEvalCallback and plot_results support a sweep. |
-| [cbf_damped_gain_eval_sweep.py](../scripts/cbf_damped_gain_eval_sweep.py) | coarse_damped_candidates and refined_damped_candidates generate the search grid; set_cbf_gains and evaluate_candidate run one point; summarize, plot_summary, and plot_summary_heatmap rank the sweep. |
-| [cbf_eps_side_eval_sweep.py](../scripts/cbf_eps_side_eval_sweep.py) | parse_eps_values reads the epsilon grid; evaluate_eps runs one side-gain setting; summarize and plot_summary compare safety and intervention effects; write_outputs publishes rows. |
-| [cbf_lambda_event_bc_pilot_sweep.py](../scripts/cbf_lambda_event_bc_pilot_sweep.py) | install_event_penalty_env installs the event penalty; evaluate_model measures one trial; PilotEvalCallback logs progress; trial_config_rows, summarize, score_summary, plot_trial_history, and plot_aggregate package the sweep. |
-| [cbf_lambda_gradient_calibration.py](../scripts/cbf_lambda_gradient_calibration.py) | collect_diagnostic_batch and actor_grad_norm inspect gradient scale; bc_loss_from_batch and gradient_tables compare behavior-cloning and reward terms; reward_scale_tables and recommend_ranges turn measurements into candidate ranges; plot_outputs renders the calibration. |
-| [cbf_reward_term_ablation.py](../scripts/cbf_reward_term_ablation.py) | make_reward_config isolates reward terms; make_single_env and make_training_env construct the trial; evaluate_model and summarize calculate behavior/safety metrics; RewardAblationEvalCallback and plot functions track the ablation. |
-| [cbf_safety_obs_experiment.py](../scripts/cbf_safety_obs_experiment.py) | install_safety_observation_env adds the safety observation variant; evaluate_variant and SafetyObsEvalCallback measure it; plot_interpretability visualizes the added information. |
-| [guided_cbf_lambda_ablation.py](../scripts/guided_cbf_lambda_ablation.py) | load_notebook_namespace and find_repo_root reconstruct the notebook runtime; evaluate_guided_policy measures one guidance weight; summarize_metrics reports the result; LambdaAblationCallback logs the sweep; trial_tag creates stable trial names. |
-| [run_cbf_filter_ablation.py](../scripts/run_cbf_filter_ablation.py) | make_raw_env, make_cbf_env, and make_training_env construct the raw and filtered conditions; train_variant trains one condition; evaluate_scenario and evaluate_models run paired episodes; factorial_effects and paired_comparisons quantify the filter effect; checkpoint and wrapper-state functions make resume/evaluation reproducible. |
-| [evaluate_cbf_filter_ablation.py](../scripts/evaluate_cbf_filter_ablation.py) | _make_ablation_env and _set_filter_info construct and instrument conditions; evaluate_condition runs episodes; part1_ten_kpi_table and part1_inline_kpi_table calculate the KPI table; make_figures creates the diagnostic figures. |
-| [evaluate_filter_policy_contribution.py](../scripts/evaluate_filter_policy_contribution.py) | model_action_to_physical and physical_to_normalized make action conversions explicit; make_raw_eval_env and make_cbf_eval_env create paired environments; evaluate_one, aggregate_episode_rows, and compute_diagnostics measure raw, filtered, and rule baselines; write_tensorboard and plot_summary publish outputs. |
+| [train_cbf_damped_gain.py](../scripts/training/train_cbf_damped_gain.py) | set_cbf_gains and set_vec_cbf_gains apply gain overrides; make_eval_env builds the evaluation wrapper; evaluate_model and summarize measure the damped-gain candidate; DampedGainEvalCallback and plot_results support a sweep. |
+| [cbf_damped_gain_eval_sweep.py](../scripts/evaluation/cbf_damped_gain_eval_sweep.py) | coarse_damped_candidates and refined_damped_candidates generate the search grid; set_cbf_gains and evaluate_candidate run one point; summarize, plot_summary, and plot_summary_heatmap rank the sweep. |
+| [cbf_eps_side_eval_sweep.py](../scripts/evaluation/cbf_eps_side_eval_sweep.py) | parse_eps_values reads the epsilon grid; evaluate_eps runs one side-gain setting; summarize and plot_summary compare safety and intervention effects; write_outputs publishes rows. |
+| [cbf_lambda_event_bc_pilot_sweep.py](../scripts/training/cbf_lambda_event_bc_pilot_sweep.py) | install_event_penalty_env installs the event penalty; evaluate_model measures one trial; PilotEvalCallback logs progress; trial_config_rows, summarize, score_summary, plot_trial_history, and plot_aggregate package the sweep. |
+| [cbf_lambda_gradient_calibration.py](../scripts/evaluation/cbf_lambda_gradient_calibration.py) | collect_diagnostic_batch and actor_grad_norm inspect gradient scale; bc_loss_from_batch and gradient_tables compare behavior-cloning and reward terms; reward_scale_tables and recommend_ranges turn measurements into candidate ranges; plot_outputs renders the calibration. |
+| [cbf_reward_term_ablation.py](../scripts/training/cbf_reward_term_ablation.py) | make_reward_config isolates reward terms; make_single_env and make_training_env construct the trial; evaluate_model and summarize calculate behavior/safety metrics; RewardAblationEvalCallback and plot functions track the ablation. |
+| [cbf_safety_obs_experiment.py](../scripts/training/cbf_safety_obs_experiment.py) | install_safety_observation_env adds the safety observation variant; evaluate_variant and SafetyObsEvalCallback measure it; plot_interpretability visualizes the added information. |
+| [guided_cbf_lambda_ablation.py](../scripts/training/guided_cbf_lambda_ablation.py) | load_notebook_namespace and find_repo_root reconstruct the notebook runtime; evaluate_guided_policy measures one guidance weight; summarize_metrics reports the result; LambdaAblationCallback logs the sweep; trial_tag creates stable trial names. |
+| [run_cbf_filter_ablation.py](../scripts/training/run_cbf_filter_ablation.py) | make_raw_env, make_cbf_env, and make_training_env construct the raw and filtered conditions; train_variant trains one condition; evaluate_scenario and evaluate_models run paired episodes; factorial_effects and paired_comparisons quantify the filter effect; checkpoint and wrapper-state functions make resume/evaluation reproducible. |
+| [evaluate_cbf_filter_ablation.py](../scripts/evaluation/evaluate_cbf_filter_ablation.py) | _make_ablation_env and _set_filter_info construct and instrument conditions; evaluate_condition runs episodes; part1_ten_kpi_table and part1_inline_kpi_table calculate the KPI table; make_figures creates the diagnostic figures. |
+| [evaluate_filter_policy_contribution.py](../scripts/evaluation/evaluate_filter_policy_contribution.py) | model_action_to_physical and physical_to_normalized make action conversions explicit; make_raw_eval_env and make_cbf_eval_env create paired environments; evaluate_one, aggregate_episode_rows, and compute_diagnostics measure raw, filtered, and rule baselines; write_tensorboard and plot_summary publish outputs. |
 
 ## PPO policy implementations and progression
 
@@ -416,11 +420,11 @@ the expensive progression.
 
 | Script | Main functions and purpose |
 | --- | --- |
-| [run_nominal_ppo_parameter_pilot.py](../scripts/run_nominal_ppo_parameter_pilot.py) | build_ppo_model and effective_ppo_config define a pilot; train_one_run executes one seed/config; PPOEvaluationCallback, PPOActionClipCallback, and PPORolloutDiagnosticsCache collect progress; checkpoint helpers validate strict bundles; final_three_seed_averages, across_seed_final_three, rank_final_three, and write_summaries produce the selection report. |
-| [run_nominal_ppo_density_pilot.py](../scripts/run_nominal_ppo_density_pilot.py) | ProgressCallback records training; _make_env and _make_vec_env create density conditions; evaluate_model and aggregate_evaluation compare episodes; main publishes the pilot table. |
-| [evaluate_ppo_checkpoints.py](../scripts/evaluate_ppo_checkpoints.py) | _checkpoint_paths enumerates checkpoints; _load_run_config and _override_cbf_snapshot reconstruct the run; _summarize and _select_rows reduce checkpoint evaluations to comparable rows. |
-| [evaluate_ppo_cbf_deployment.py](../scripts/evaluate_ppo_cbf_deployment.py) | _build_runtime reconstructs the deployment environment; _raw_final_rows selects terminal records; _summarize computes deployment metrics; _source_paths and _write_json preserve provenance. |
-| [evaluate_ppo_cbf_counterfactuals.py](../scripts/evaluate_ppo_cbf_counterfactuals.py) | collect_state_candidates and _write_state_bank create fixed-state comparisons; evaluate_fixed_state_bank and summarize_fixed_actions compare raw, filtered, and executed actions; summarize_occupancy and make_plots report occupancy and action distributions. |
+| [run_nominal_ppo_parameter_pilot.py](../scripts/training/run_nominal_ppo_parameter_pilot.py) | build_ppo_model and effective_ppo_config define a pilot; train_one_run executes one seed/config; PPOEvaluationCallback, PPOActionClipCallback, and PPORolloutDiagnosticsCache collect progress; checkpoint helpers validate strict bundles; final_three_seed_averages, across_seed_final_three, rank_final_three, and write_summaries produce the selection report. |
+| [run_nominal_ppo_density_pilot.py](../scripts/training/run_nominal_ppo_density_pilot.py) | ProgressCallback records training; _make_env and _make_vec_env create density conditions; evaluate_model and aggregate_evaluation compare episodes; main publishes the pilot table. |
+| [evaluate_ppo_checkpoints.py](../scripts/evaluation/evaluate_ppo_checkpoints.py) | _checkpoint_paths enumerates checkpoints; _load_run_config and _override_cbf_snapshot reconstruct the run; _summarize and _select_rows reduce checkpoint evaluations to comparable rows. |
+| [evaluate_ppo_cbf_deployment.py](../scripts/evaluation/evaluate_ppo_cbf_deployment.py) | _build_runtime reconstructs the deployment environment; _raw_final_rows selects terminal records; _summarize computes deployment metrics; _source_paths and _write_json preserve provenance. |
+| [evaluate_ppo_cbf_counterfactuals.py](../scripts/evaluation/evaluate_ppo_cbf_counterfactuals.py) | collect_state_candidates and _write_state_bank create fixed-state comparisons; evaluate_fixed_state_bank and summarize_fixed_actions compare raw, filtered, and executed actions; summarize_occupancy and make_plots report occupancy and action distributions. |
 
 ## DDPG baselines and legacy comparisons
 
@@ -430,16 +434,16 @@ should not be confused with removed lane-indexed DQN material.
 
 | Script | Main functions and purpose |
 | --- | --- |
-| [train_ddpg_y_target_50k.py](../scripts/train_ddpg_y_target_50k.py) | find_repo_root and load_notebook_namespace load the canonical implementation; main trains the target-y observation baseline; summarize reports its result. |
-| [train_ddpg_ego_y_only_50k.py](../scripts/train_ddpg_ego_y_only_50k.py) | Loads the notebook DDPG stack and trains the ego-y-only observation variant; summarize creates the compact result. |
-| [train_ddpg_cbf_500k.py](../scripts/train_ddpg_cbf_500k.py) | PersistentCBFEvalCallback evaluates during training; latest_checkpoint resolves recovery; summarize and plot_history publish progress; main runs the 500k CBF baseline. |
-| [train_ddpg_cbf_ray_mask.py](../scripts/train_ddpg_cbf_ray_mask.py) | evaluate_ray_mask_policy measures the ray-mask filter; summarize and latest_checkpoint handle results and resume; main runs the comparison. |
-| [ddpg_cbf_gain_sweep_50k.py](../scripts/ddpg_cbf_gain_sweep_50k.py) | set_cbf_gains applies each gain tuple; make_cbf_eval_env_for_gains and evaluate_cbf_policy_for_gains run it; action_trace and summarize_final expose action and KPI changes; GainSweepCallback records the sweep. |
-| [ddpg_cbf_intervention_sweep_50k.py](../scripts/ddpg_cbf_intervention_sweep_50k.py) | set_cbf_params and set_vec_cbf_params apply scalar/vector settings; make_eval_env and evaluate_policy run episodes; action_trace and summarize report intervention behavior; SweepCallback records trials. |
-| [ddpg_cbf_lambda005_experiment.py](../scripts/ddpg_cbf_lambda005_experiment.py) | _load_notebook_context and environment builders reconstruct the experiment; evaluate_policy_fixed_800_step_windows and evaluate_cbf_policy_with_paper_metrics implement the fixed evaluation protocol; CBFPaperMetricsCallback logs it; add_algorithm, rename_ddpg_history, evaluate_ddpg_final, and plot_paper_metrics build the comparison. |
-| [retrain_ddpg_stepwise_comparison.py](../scripts/retrain_ddpg_stepwise_comparison.py) | make_baseline_env and make_cbf_env construct paired conditions; make_model and train_variant train them; StepwiseTrainingLogger records stepwise behavior; add_rolling_columns, plot_training_curves, plot_cbf_filter, and write_summary package the comparison. |
-| [run_nominal_ddpg_parameter_pilot.py](../scripts/run_nominal_ddpg_parameter_pilot.py) | build_pilot_model and train_one_run run one controlled seed; OutputDirectoryRunLock prevents concurrent writers; PilotEvaluationCallback and RetainedStrictCheckpointCallback collect and retain evaluations; critic_diagnostics, build_critic_calibration_bins, and summarize_critic_calibration_samples inspect value learning; final_three_seed_averages, across_seed_final_three, rank_final_three, rank_confirmation_rollout, paired_seed_differences, and write_summaries select a configuration. |
-| [compare_nominal_ppo_ddpg.py](../scripts/compare_nominal_ppo_ddpg.py) | build_common_formulation and validate_common_formulation ensure the methods share a fair contract; child_command and _run_child invoke method-specific pilots; verify_child_configs checks their payloads; aggregate_checkpoint, build_comparison_tables, and comparison_delta combine and compare the results. |
+| [train_ddpg_y_target_50k.py](../scripts/training/train_ddpg_y_target_50k.py) | find_repo_root and load_notebook_namespace load the canonical implementation; main trains the target-y observation baseline; summarize reports its result. |
+| [train_ddpg_ego_y_only_50k.py](../scripts/training/train_ddpg_ego_y_only_50k.py) | Loads the notebook DDPG stack and trains the ego-y-only observation variant; summarize creates the compact result. |
+| [train_ddpg_cbf_500k.py](../scripts/training/train_ddpg_cbf_500k.py) | PersistentCBFEvalCallback evaluates during training; latest_checkpoint resolves recovery; summarize and plot_history publish progress; main runs the 500k CBF baseline. |
+| [train_ddpg_cbf_ray_mask.py](../scripts/training/train_ddpg_cbf_ray_mask.py) | evaluate_ray_mask_policy measures the ray-mask filter; summarize and latest_checkpoint handle results and resume; main runs the comparison. |
+| [ddpg_cbf_gain_sweep_50k.py](../scripts/training/ddpg_cbf_gain_sweep_50k.py) | set_cbf_gains applies each gain tuple; make_cbf_eval_env_for_gains and evaluate_cbf_policy_for_gains run it; action_trace and summarize_final expose action and KPI changes; GainSweepCallback records the sweep. |
+| [ddpg_cbf_intervention_sweep_50k.py](../scripts/training/ddpg_cbf_intervention_sweep_50k.py) | set_cbf_params and set_vec_cbf_params apply scalar/vector settings; make_eval_env and evaluate_policy run episodes; action_trace and summarize report intervention behavior; SweepCallback records trials. |
+| [ddpg_cbf_lambda005_experiment.py](../scripts/training/ddpg_cbf_lambda005_experiment.py) | _load_notebook_context and environment builders reconstruct the experiment; evaluate_policy_fixed_800_step_windows and evaluate_cbf_policy_with_paper_metrics implement the fixed evaluation protocol; CBFPaperMetricsCallback logs it; add_algorithm, rename_ddpg_history, evaluate_ddpg_final, and plot_paper_metrics build the comparison. |
+| [retrain_ddpg_stepwise_comparison.py](../scripts/training/retrain_ddpg_stepwise_comparison.py) | make_baseline_env and make_cbf_env construct paired conditions; make_model and train_variant train them; StepwiseTrainingLogger records stepwise behavior; add_rolling_columns, plot_training_curves, plot_cbf_filter, and write_summary package the comparison. |
+| [run_nominal_ddpg_parameter_pilot.py](../scripts/training/run_nominal_ddpg_parameter_pilot.py) | build_pilot_model and train_one_run run one controlled seed; OutputDirectoryRunLock prevents concurrent writers; PilotEvaluationCallback and RetainedStrictCheckpointCallback collect and retain evaluations; critic_diagnostics, build_critic_calibration_bins, and summarize_critic_calibration_samples inspect value learning; final_three_seed_averages, across_seed_final_three, rank_final_three, rank_confirmation_rollout, paired_seed_differences, and write_summaries select a configuration. |
+| [compare_nominal_ppo_ddpg.py](../scripts/evaluation/compare_nominal_ppo_ddpg.py) | build_common_formulation and validate_common_formulation ensure the methods share a fair contract; child_command and _run_child invoke method-specific pilots; verify_child_configs checks their payloads; aggregate_checkpoint, build_comparison_tables, and comparison_delta combine and compare the results. |
 
 ## Protocol runners and training internals
 
@@ -608,14 +612,14 @@ silently regenerate missing evaluation data.
 
 | Script | Function map |
 | --- | --- |
-| [plot_laneless_sample_efficiency.py](../scripts/plot_laneless_sample_efficiency.py) | RunSpec describes a run; load_run_scalars and load_training_logs read data; add_zero_start_anchor makes curves comparable; first_step_at_or_above and auc_over_logged_steps calculate sample-efficiency summaries; plot_episode_length, plot_training_return, plot_length_auc, and plot_steps_to_horizon render them. |
-| [plot_ppo_progression_results.py](../scripts/plot_ppo_progression_results.py) | _concat_variant_files and _load_tb assemble variant inputs; plot_summary_bars and plot_episode_distributions show final results; plot_post_block_trends and plot_training_episodes show learning; plot_tb_scalars and plot_tb_cbf show logged diagnostics; plot_fixed_state_summary, plot_fixed_state_actions, plot_state_bank, plot_occupancy_summary, plot_occupancy_traces, and plot_active_constraints visualize counterfactual studies; inventory_page records inputs. |
-| [plot_nominal_ppo_results.py](../scripts/plot_nominal_ppo_results.py) | _load_tensorboard loads scalars; _plot_kpi_table, _plot_kpi_bars, _plot_episode_distributions, _plot_block_trends, _plot_training_traces, and _plot_tensorboard create the nominal pilot pages; _inventory_page records file provenance. |
-| [plot_ppo_500k_saved_results.py](../scripts/plot_ppo_500k_saved_results.py) | load_run reads a saved run; _read_events loads TensorBoard; plot_kpi_bars, plot_distributions, plot_block_trends, plot_training_traces, and plot_tb make the report; inventory_page and make_report package it. |
-| [build_headline_kpi_dashboard.py](../scripts/build_headline_kpi_dashboard.py) | read_history, read_source_tensorboard_eval, and read_training_episode_tensorboard load compatible sources; load_train_eval and append_terminal_final_eval normalize final rows; write_tensorboard and write_clean_csvs publish clean data; plot_during_training, plot_training, and plot_final render the dashboard. |
-| [build_filter_contribution_dashboard.py](../scripts/build_filter_contribution_dashboard.py) | read_training_episode_tensorboard and load_diagnostics load training and diagnostic streams; load_summary and row_value normalize summary fields; write_tensorboard, write_clean_csvs, plot_during_training, plot_headline, and plot_diagnostics publish the filter-contribution dashboard. |
-| [build_cbf_ablation_report.py](../scripts/build_cbf_ablation_report.py) | StudyMetadata and _metadata capture study identity; load_inputs and _require_columns validate sources; _overview_metrics, _rollout_metric, _seed_means, _seed_sd, _normal_ci, and _factorial_ci calculate statistics; grouped_overview, factorial_figure, filter_dependence, paired_comparison_figure, table_page, _title_page, and build_report assemble the report; save writes it. |
-| [build_paper_results.py](../scripts/build_paper_results.py) | discover_events and known_event_sources inventory TensorBoard; sha256, copy_file, and event_time preserve provenance; extract_scalars and summarize_final reduce events; write_filtered_trace and baseline_metadata create trace metadata; plot_bars and main package the laneless result bundle. |
+| [plot_laneless_sample_efficiency.py](../scripts/reporting/plot_laneless_sample_efficiency.py) | RunSpec describes a run; load_run_scalars and load_training_logs read data; add_zero_start_anchor makes curves comparable; first_step_at_or_above and auc_over_logged_steps calculate sample-efficiency summaries; plot_episode_length, plot_training_return, plot_length_auc, and plot_steps_to_horizon render them. |
+| [plot_ppo_progression_results.py](../scripts/reporting/plot_ppo_progression_results.py) | _concat_variant_files and _load_tb assemble variant inputs; plot_summary_bars and plot_episode_distributions show final results; plot_post_block_trends and plot_training_episodes show learning; plot_tb_scalars and plot_tb_cbf show logged diagnostics; plot_fixed_state_summary, plot_fixed_state_actions, plot_state_bank, plot_occupancy_summary, plot_occupancy_traces, and plot_active_constraints visualize counterfactual studies; inventory_page records inputs. |
+| [plot_nominal_ppo_results.py](../scripts/reporting/plot_nominal_ppo_results.py) | _load_tensorboard loads scalars; _plot_kpi_table, _plot_kpi_bars, _plot_episode_distributions, _plot_block_trends, _plot_training_traces, and _plot_tensorboard create the nominal pilot pages; _inventory_page records file provenance. |
+| [plot_ppo_500k_saved_results.py](../scripts/reporting/plot_ppo_500k_saved_results.py) | load_run reads a saved run; _read_events loads TensorBoard; plot_kpi_bars, plot_distributions, plot_block_trends, plot_training_traces, and plot_tb make the report; inventory_page and make_report package it. |
+| [build_headline_kpi_dashboard.py](../scripts/reporting/build_headline_kpi_dashboard.py) | read_history, read_source_tensorboard_eval, and read_training_episode_tensorboard load compatible sources; load_train_eval and append_terminal_final_eval normalize final rows; write_tensorboard and write_clean_csvs publish clean data; plot_during_training, plot_training, and plot_final render the dashboard. |
+| [build_filter_contribution_dashboard.py](../scripts/reporting/build_filter_contribution_dashboard.py) | read_training_episode_tensorboard and load_diagnostics load training and diagnostic streams; load_summary and row_value normalize summary fields; write_tensorboard, write_clean_csvs, plot_during_training, plot_headline, and plot_diagnostics publish the filter-contribution dashboard. |
+| [build_cbf_ablation_report.py](../scripts/reporting/build_cbf_ablation_report.py) | StudyMetadata and _metadata capture study identity; load_inputs and _require_columns validate sources; _overview_metrics, _rollout_metric, _seed_means, _seed_sd, _normal_ci, and _factorial_ci calculate statistics; grouped_overview, factorial_figure, filter_dependence, paired_comparison_figure, table_page, _title_page, and build_report assemble the report; save writes it. |
+| [build_paper_results.py](../scripts/reporting/build_paper_results.py) | discover_events and known_event_sources inventory TensorBoard; sha256, copy_file, and event_time preserve provenance; extract_scalars and summarize_final reduce events; write_filtered_trace and baseline_metadata create trace metadata; plot_bars and main package the laneless result bundle. |
 
 The dashboard builders are downstream consumers. A missing metric should remain
 missing or be reported as unavailable; it should not be silently replaced by a
@@ -679,30 +683,30 @@ The following conventions are important when adding a new script:
 
 ### Environment smoke test
 
-    python scripts\mtm_laneless_smoke.py --episodes 1
+    python -m scripts.ops.mtm_laneless_smoke --episodes 1
 
 Then inspect the reported observation/action shapes, bounds, collision count,
 and termination reason.
 
 ### Notebook-backed evaluation
 
-    python scripts\evaluate_laneless_karalakou.py --help
+    python -m scripts.evaluation.evaluate_laneless_karalakou --help
 
 Choose an existing model and an explicit output stem. The evaluator should
 record the notebook hash and write a complete KPI summary before plotting.
 
 ### PPO progression
 
-    python scripts\run_ppo_formulation_screen.py --help
-    python scripts\run_ppo_cbf_progression.py --help
+    python -m scripts.training.run_ppo_formulation_screen --help
+    python -m scripts.training.run_ppo_cbf_progression --help
 
 Screen semantics first, then run the named progression variant with a dedicated
 output directory. Resume only when the stored training signature matches.
 
 ### DDPG comparison
 
-    python scripts\run_nominal_ddpg_parameter_pilot.py --help
-    python scripts\compare_nominal_ppo_ddpg.py --help
+    python -m scripts.training.run_nominal_ddpg_parameter_pilot --help
+    python -m scripts.evaluation.compare_nominal_ppo_ddpg --help
 
 Run the DDPG pilot and its critic calibration before making a PPO/DDPG claim.
 The comparison runner is the place to verify that action, observation, traffic,
@@ -710,7 +714,7 @@ and evaluation contracts are shared.
 
 ### Fixed-state safety analysis
 
-    python scripts\evaluate_cbf_counterfactuals.py --help
+    python -m scripts.evaluation.evaluate_cbf_counterfactuals --help
 
 Create or reuse a fixed state bank, compare raw and filtered actions at the same
 states, and report typed active constraints and occupancy. Do not compare

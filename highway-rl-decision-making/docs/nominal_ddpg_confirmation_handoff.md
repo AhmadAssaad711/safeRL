@@ -28,7 +28,7 @@ errors are reported but do not contribute to the winner rank.
 From any PowerShell working directory:
 
 ```powershell
-& "<repo>\scripts\run_nominal_ddpg_confirmation.ps1"
+& "<repo>\scripts\ops\run_nominal_ddpg_confirmation.ps1"
 ```
 
 The default output is `C:\agv_pilot_confirm_final`. Standard output and error
@@ -40,13 +40,13 @@ the fresh-run guard remains valid.
 One status snapshot:
 
 ```powershell
-& "<repo>\scripts\monitor_nominal_ddpg_confirmation.ps1"
+& "<repo>\scripts\ops\monitor_nominal_ddpg_confirmation.ps1"
 ```
 
 Continuous monitoring:
 
 ```powershell
-& "<repo>\scripts\monitor_nominal_ddpg_confirmation.ps1" -Watch
+& "<repo>\scripts\ops\monitor_nominal_ddpg_confirmation.ps1" -Watch
 ```
 
 One Windows virtual-environment invocation normally appears as two `python.exe`
@@ -58,7 +58,7 @@ PIDs. The monitor groups the launcher and child interpreter and reports one
 Use exactly the same launcher parameters:
 
 ```powershell
-& "<repo>\scripts\run_nominal_ddpg_confirmation.ps1" -Resume
+& "<repo>\scripts\ops\run_nominal_ddpg_confirmation.ps1" -Resume
 ```
 
 Do not edit the pilot runner, shared evaluation pipeline, environment, notebook,
