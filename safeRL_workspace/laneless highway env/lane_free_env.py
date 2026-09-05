@@ -1775,135 +1775,151 @@ class LaneFreeTrafficEnv(AbstractEnv):
         constraints: list[tuple[int, int, float, float]] = []
         infeasible = 0
 
-        for first in range(count - 1):
-            for second in range(first + 1, count):
-                lateral_offset = float(y[second] - y[first])
-                if abs(lateral_offset) > 1e-9:
-                    separation_sign = float(np.sign(lateral_offset))
-                else:
-                    # This tie-break is deterministic and chooses the ordering
-                    # with more combined room before any overlap has occurred.
-                    first_lower_room = float(y[first] - 0.5 * widths[first])
-                    first_upper_room = float(
-                        self.config["road_width"]
-                        - 0.5 * widths[first]
-                        - y[first]
-                    )
-                    second_lower_room = float(y[second] - 0.5 * widths[second])
-                    second_upper_room = float(
-                        self.config["road_width"]
-                        - 0.5 * widths[second]
-                        - y[second]
-                    )
-                    separation_sign = (
-                        1.0
-                        if second_upper_room + first_lower_room
-                        >= second_lower_room + first_upper_room
-                        else -1.0
-                    )
+        # Candidate discovery is intentionally vectorized.  The subsequent
+        # projection loop is still ordered identically to the historical
+        # nested Python loop, which preserves deterministic multi-contact
+        # resolution while avoiding work for the overwhelmingly common case
+        # where a pair cannot reach a side contact during this horizon.
+        pair_cache = getattr(self, "_traffic_guard_pair_indices", None)
+        if (
+            pair_cache is None
+            or len(pair_cache) != 2
+            or len(pair_cache[0]) != count * (count - 1) // 2
+        ):
+            pair_cache = np.triu_indices(count, k=1)
+            self._traffic_guard_pair_indices = pair_cache
+        first_indices, second_indices = pair_cache
 
-                half_width_sum = 0.5 * float(widths[first] + widths[second])
-                physical_lateral_clearance = (
-                    abs(lateral_offset) - half_width_sum
-                )
-                separation_rate = separation_sign * float(
-                    vy[second] - vy[first]
-                )
-                if separation_rate >= -1e-9:
-                    continue
+        lateral_offset = y[second_indices] - y[first_indices]
+        separation_sign = np.sign(lateral_offset)
+        tied = np.abs(lateral_offset) <= 1e-9
+        if np.any(tied):
+            # This tie-break is deterministic and chooses the ordering with
+            # more combined room before any overlap has occurred.
+            first_lower_room = y[first_indices] - 0.5 * widths[first_indices]
+            first_upper_room = (
+                float(self.config["road_width"])
+                - 0.5 * widths[first_indices]
+                - y[first_indices]
+            )
+            second_lower_room = y[second_indices] - 0.5 * widths[second_indices]
+            second_upper_room = (
+                float(self.config["road_width"])
+                - 0.5 * widths[second_indices]
+                - y[second_indices]
+            )
+            separation_sign[tied] = np.where(
+                (
+                    second_upper_room + first_lower_room
+                )[tied]
+                >= (second_lower_room + first_upper_room)[tied],
+                1.0,
+                -1.0,
+            )
 
-                closing_speed = -separation_rate
-                physical_time_to_contact = max(
-                    physical_lateral_clearance, 0.0
-                ) / max(closing_speed, 1e-9)
-                if physical_time_to_contact > prediction_horizon:
-                    continue
+        half_width_sum = 0.5 * (
+            widths[first_indices] + widths[second_indices]
+        )
+        physical_lateral_clearance = (
+            np.abs(lateral_offset) - half_width_sum
+        )
+        separation_rate = separation_sign * (
+            vy[second_indices] - vy[first_indices]
+        )
+        candidate_mask = separation_rate < -1e-9
 
-                # Check longitudinal occupancy at the predicted side-contact
-                # instant. Sampling +/- one physics step makes the gate robust
-                # to discrete integration without creating a comfort buffer.
-                signed_dx = float(
-                    (
-                        x[second]
-                        - x[first]
-                        + 0.5 * road_length
-                    )
-                    % road_length
-                    - 0.5 * road_length
-                )
-                relative_vx = float(vx[second] - vx[first])
-                relative_ax = float(
-                    projected[second, 0] - projected[first, 0]
-                )
-                sample_times = np.unique(
-                    np.clip(
-                        np.asarray(
-                            [
-                                physical_time_to_contact - float(dt),
-                                physical_time_to_contact,
-                                physical_time_to_contact + float(dt),
-                            ],
-                            dtype=float,
-                        ),
-                        0.0,
-                        prediction_horizon,
-                    )
-                )
-                predicted_dx = (
-                    signed_dx
-                    + relative_vx * sample_times
-                    + 0.5 * relative_ax * sample_times**2
-                )
-                predicted_dx = (
-                    predicted_dx + 0.5 * road_length
-                ) % road_length - 0.5 * road_length
-                half_length_sum = 0.5 * float(
-                    lengths[first] + lengths[second]
-                )
-                if float(np.min(np.abs(predicted_dx))) >= half_length_sum:
-                    continue
+        closing_speed = -separation_rate
+        physical_time_to_contact = np.maximum(
+            physical_lateral_clearance, 0.0
+        ) / np.maximum(closing_speed, 1e-9)
+        candidate_mask &= physical_time_to_contact <= prediction_horizon
 
-                usable_clearance = max(
-                    physical_lateral_clearance - contact_margin, 1e-6
-                )
-                required_separation_acceleration = (
-                    closing_speed**2 / (2.0 * usable_clearance)
-                )
+        # Check longitudinal occupancy at the predicted side-contact instant.
+        # Sampling +/- one physics step makes the gate robust to discrete
+        # integration without creating a comfort buffer.  Duplicate clipped
+        # sample times do not affect the minimum, so a fixed three-column
+        # array is equivalent to the historical np.unique call.
+        signed_dx = (
+            (
+                x[second_indices]
+                - x[first_indices]
+                + 0.5 * road_length
+            )
+            % road_length
+            - 0.5 * road_length
+        )
+        relative_vx = vx[second_indices] - vx[first_indices]
+        relative_ax = (
+            projected[second_indices, 0] - projected[first_indices, 0]
+        )
+        sample_times = np.clip(
+            physical_time_to_contact[:, None]
+            + np.asarray([-float(dt), 0.0, float(dt)], dtype=float)[None, :],
+            0.0,
+            prediction_horizon,
+        )
+        predicted_dx = (
+            signed_dx[:, None]
+            + relative_vx[:, None] * sample_times
+            + 0.5 * relative_ax[:, None] * sample_times**2
+        )
+        predicted_dx = (
+            predicted_dx + 0.5 * road_length
+        ) % road_length - 0.5 * road_length
+        candidate_mask &= np.min(
+            np.abs(predicted_dx), axis=1
+        ) < 0.5 * (lengths[first_indices] + lengths[second_indices])
 
-                first_controlled = bool(controlled[first])
-                second_controlled = bool(controlled[second])
-                if first_controlled and second_controlled:
-                    infeasible += 1
-                    continue
-                if separation_sign > 0.0:
-                    maximum_first = (
-                        projected[first, 1] if first_controlled else ay_min
-                    )
-                    maximum_second = (
-                        projected[second, 1] if second_controlled else ay_max
-                    )
-                else:
-                    maximum_first = (
-                        projected[first, 1] if first_controlled else ay_max
-                    )
-                    maximum_second = (
-                        projected[second, 1] if second_controlled else ay_min
-                    )
-                maximum_separation_acceleration = separation_sign * float(
-                    maximum_second - maximum_first
-                )
-                if (
+        usable_clearance = np.maximum(
+            physical_lateral_clearance - contact_margin, 1e-6
+        )
+        required_separation_acceleration = (
+            closing_speed**2 / (2.0 * usable_clearance)
+        )
+
+        first_controlled = controlled[first_indices]
+        second_controlled = controlled[second_indices]
+        both_controlled = first_controlled & second_controlled
+        infeasible += int(np.count_nonzero(candidate_mask & both_controlled))
+        candidate_mask &= ~both_controlled
+
+        positive_separation = separation_sign > 0.0
+        maximum_first = np.where(
+            positive_separation,
+            np.where(first_controlled, projected[first_indices, 1], ay_min),
+            np.where(first_controlled, projected[first_indices, 1], ay_max),
+        )
+        maximum_second = np.where(
+            positive_separation,
+            np.where(second_controlled, projected[second_indices, 1], ay_max),
+            np.where(second_controlled, projected[second_indices, 1], ay_min),
+        )
+        maximum_separation_acceleration = separation_sign * (
+            maximum_second - maximum_first
+        )
+        infeasible += int(
+            np.count_nonzero(
+                candidate_mask
+                & (
                     required_separation_acceleration
                     > maximum_separation_acceleration + 1e-9
-                ):
-                    infeasible += 1
-                target = min(
-                    required_separation_acceleration,
-                    max(maximum_separation_acceleration, 0.0),
                 )
-                constraints.append(
-                    (first, second, separation_sign, float(target))
-                )
+            )
+        )
+        target = np.minimum(
+            required_separation_acceleration,
+            np.maximum(maximum_separation_acceleration, 0.0),
+        )
+        candidate_indices = np.flatnonzero(candidate_mask)
+        constraints = [
+            (
+                int(first_indices[index]),
+                int(second_indices[index]),
+                float(separation_sign[index]),
+                float(target[index]),
+            )
+            for index in candidate_indices
+        ]
 
         original_lateral = projected[:, 1].copy()
         # Repeated half-space projections resolve vehicles participating in
