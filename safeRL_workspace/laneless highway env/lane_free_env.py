@@ -960,6 +960,15 @@ class LaneFreeTrafficEnv(AbstractEnv):
             and callable(substep_filter)
         )
         substep_records: list[dict[str, Any]] = []
+        # A policy action may cover several physics frames.  Preserve every
+        # collision event observed during that interval instead of exposing
+        # only the final frame's counters.  Active contacts are reported as
+        # the maximum simultaneous occupancy seen during the interval, while
+        # the ego flag remains true once any ego contact has occurred.
+        policy_collision_count = 0
+        policy_active_collision_count = 0
+        policy_ego_collision_count = 0
+        policy_ego_collision = False
         for frame_index in range(frames):
             accelerations = self._compute_accelerations()
             if bool(self.config["ego_controlled"]):
@@ -1011,8 +1020,22 @@ class LaneFreeTrafficEnv(AbstractEnv):
             self._last_accelerations = accelerations
             self._integrate(accelerations, dt)
             self._detect_collisions()
+            policy_collision_count += int(self._last_collision_count)
+            policy_active_collision_count = max(
+                policy_active_collision_count,
+                int(self._last_active_collision_count),
+            )
+            policy_ego_collision_count += int(self._last_ego_collision_count)
+            policy_ego_collision = bool(
+                policy_ego_collision or self._last_ego_collision
+            )
             self.steps += 1
             self.time += dt
+
+        self._last_collision_count = policy_collision_count
+        self._last_active_collision_count = policy_active_collision_count
+        self._last_ego_collision_count = policy_ego_collision_count
+        self._last_ego_collision = policy_ego_collision
 
         self._last_cbf_substep_diagnostics = self._substep_filter_summary(
             substep_records, enabled=substep_enabled
