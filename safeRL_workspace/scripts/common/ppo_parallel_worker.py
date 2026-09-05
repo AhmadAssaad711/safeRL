@@ -9,8 +9,22 @@ from __future__ import annotations
 
 import copy
 import functools
+import os
 from pathlib import Path
 from typing import Any
+
+# Subprocesses inherit the host's native-thread defaults.  Set these before
+# importing NumPy/PyTorch/Stable-Baselines3 so each small simulator worker
+# remains one-threaded instead of creating a full BLAS pool of its own.
+for _native_thread_key in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "TORCH_NUM_THREADS",
+):
+    os.environ.setdefault(_native_thread_key, "1")
 
 import gymnasium as gym
 from stable_baselines3.common.monitor import Monitor
@@ -31,6 +45,9 @@ def make_parallel_worker_env(
 ) -> gym.Env:
     """Build one complete worker environment inside the spawned process."""
 
+    # Keep this call for workers imported through an already-running parent
+    # process; the module-level defaults above cover normal spawn imports.
+    pipeline.set_stable_native_defaults()
     root = Path(project_root)
     namespace = pipeline.bootstrap_notebook_namespace(root)
     pipeline.exec_required_notebook_cells(
