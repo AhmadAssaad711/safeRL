@@ -12,6 +12,7 @@ from pathlib import Path
 
 SCRIPT_MODULES: dict[str, str] = {
     "cbf_projection.py": "scripts.common.cbf_projection",
+    "cbf_geometry.py": "scripts.common.cbf_geometry",
     "cbf_ray_mask.py": "scripts.common.cbf_ray_mask",
     "guided_cbf_minimal.py": "scripts.common.guided_cbf_minimal",
     "laneless_evaluation_registry.py": "scripts.common.laneless_evaluation_registry",

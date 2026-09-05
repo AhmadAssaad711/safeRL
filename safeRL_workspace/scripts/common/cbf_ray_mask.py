@@ -91,22 +91,59 @@ def build_cbf_action_constraints(
     min_required_distance = np.inf
     neighbor_constraints = 0
 
-    for neighbor in neighbors:
-        other_acc = np.asarray([float(neighbor.get("ax", 0.0)), float(neighbor.get("ay", 0.0))], dtype=float)
-        A, b, h_ij, center_distance, required_distance = namespace["pairwise_hocbf_constraint"](
+    batch_builder = namespace.get("batch_pairwise_hocbf_constraints")
+    if callable(batch_builder) and neighbors:
+        batch = batch_builder(
             ego,
-            neighbor,
+            neighbors,
             eps_side=eps_side,
             k0=k0,
             k1=k1,
-            other_acc=other_acc,
         )
-        constraint_rows.append(np.asarray(A, dtype=float))
-        constraint_bounds.append(float(b))
-        min_h = min(min_h, float(h_ij))
-        min_center_distance = min(min_center_distance, float(center_distance))
-        min_required_distance = min(min_required_distance, float(required_distance))
-        neighbor_constraints += 1
+        for index in range(len(neighbors)):
+            constraint_rows.append(np.asarray(batch["A"][index], dtype=float))
+            constraint_bounds.append(float(batch["b"][index]))
+            min_h = min(min_h, float(batch["h"][index]))
+            min_center_distance = min(
+                min_center_distance,
+                float(batch["center_distance"][index]),
+            )
+            min_required_distance = min(
+                min_required_distance,
+                float(batch["required_distance"][index]),
+            )
+            neighbor_constraints += 1
+    else:
+        for neighbor in neighbors:
+            other_acc = np.asarray(
+                [
+                    float(neighbor.get("ax", 0.0)),
+                    float(neighbor.get("ay", 0.0)),
+                ],
+                dtype=float,
+            )
+            A, b, h_ij, center_distance, required_distance = namespace[
+                "pairwise_hocbf_constraint"
+            ](
+                ego,
+                neighbor,
+                eps_side=eps_side,
+                k0=k0,
+                k1=k1,
+                other_acc=other_acc,
+            )
+            constraint_rows.append(np.asarray(A, dtype=float))
+            constraint_bounds.append(float(b))
+            min_h = min(min_h, float(h_ij))
+            min_center_distance = min(
+                min_center_distance,
+                float(center_distance),
+            )
+            min_required_distance = min(
+                min_required_distance,
+                float(required_distance),
+            )
+            neighbor_constraints += 1
 
     ego_y = float(ego["y"])
     ego_vy = float(ego["vy"])
