@@ -41,6 +41,7 @@ evaluation budget.
 ## Layout
 
     configs/                 Reusable MTM live configuration
+    ../artifacts/            Committed compact laneless result manifests
     docs/                    SafeRL experiment and API documentation
     laneless highway env/   lane-free-v0 implementation and demo
     notebooks/              Canonical lanelessKaralakou notebook
@@ -48,5 +49,5 @@ evaluation budget.
     tests/                  Unit and protocol tests
 
 Generated models, event logs, videos, plots, and new result folders are
-ignored by Git. Existing root ppo_* directories are compact committed
+ignored by Git. Existing ../artifacts/ppo_* directories are compact committed
 safeRL result manifests retained for provenance.

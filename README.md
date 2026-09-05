@@ -36,7 +36,7 @@ strict collision-free 1 km completion for evaluation.
 | highway-rl-decision-making/scripts/ | Training, CBF, evaluation, audit, plotting, and rendering runners |
 | highway-rl-decision-making/tests/ | Unit and protocol tests |
 | highway-rl-decision-making/docs/ | Experiment, scenario, and API documentation |
-| Root ppo_* directories | Committed safeRL result manifests and compact summaries |
+| artifacts/ppo_* directories | Committed safeRL result manifests and compact summaries |
 
 Lane-indexed highway notebooks, DQN implementations, unrelated planning
 experiments, machine-specific duplicate snapshots, scratch backups, and the
