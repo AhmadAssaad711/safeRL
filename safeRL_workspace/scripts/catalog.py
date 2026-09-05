@@ -79,6 +79,7 @@ SCRIPT_MODULES: dict[str, str] = {
     "render_ppo_at1_raw.py": "scripts.rendering.render_ppo_at1_raw",
     "render_ppo_ego16_live.py": "scripts.rendering.render_ppo_ego16_live",
     "mtm_laneless_smoke.py": "scripts.ops.mtm_laneless_smoke",
+    "benchmark_simulator.py": "scripts.ops.benchmark_simulator",
     "run_current_mtm_live.py": "scripts.ops.run_current_mtm_live",
     "run_mtm_y_target_live.py": "scripts.ops.run_mtm_y_target_live",
 }
