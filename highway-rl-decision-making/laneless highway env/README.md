@@ -118,7 +118,10 @@ Their probabilities and parameters live under the `mtm` config block.
 Quick force-vs-MTM smoke comparison:
 
 ```powershell
-python "..\scripts\mtm_laneless_smoke.py"
+# If your shell is currently in this environment directory:
+Set-Location ..
+# The module command must run from highway-rl-decision-making.
+python -m scripts.ops.mtm_laneless_smoke
 ```
 
 ## Demo

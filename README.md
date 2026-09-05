@@ -7,7 +7,7 @@ The canonical source of truth is
 [lanelessKaralakou.ipynb](highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb).
 It defines the environment contract, Karalakou reward, CBF geometry, PPO
 progression, legacy DDPG comparisons, evaluation protocol, and artifact
-layout. The supporting Python runners in the scripts directory execute the
+layout. The supporting Python runners in the organized scripts package execute the
 same notebook definitions out of process when a long run should not occupy
 the notebook kernel.
 
@@ -33,9 +33,9 @@ strict collision-free 1 km completion for evaluation.
 | --- | --- |
 | highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb | Canonical notebook and experiment specification |
 | highway-rl-decision-making/laneless highway env/ | lane-free-v0 environment and renderer |
-| highway-rl-decision-making/scripts/ | Training, CBF, evaluation, audit, plotting, and rendering runners |
-| highway-rl-decision-making/tests/ | Unit and protocol tests |
-| highway-rl-decision-making/docs/ | Experiment, scenario, and API documentation |
+| [highway-rl-decision-making/scripts/](highway-rl-decision-making/scripts/README.md) | Organized common, training, evaluation, reporting, rendering, and ops modules |
+| [highway-rl-decision-making/tests/](highway-rl-decision-making/tests/README.md) | Unit and protocol tests with shared pytest setup |
+| [highway-rl-decision-making/docs/](highway-rl-decision-making/docs/README.md) | Experiment, scenario, and script/function documentation |
 | artifacts/ppo_* directories | Committed safeRL result manifests and compact summaries |
 
 Lane-indexed highway notebooks, DQN implementations, unrelated planning
@@ -53,7 +53,7 @@ contains the prior state if an old reference is ever needed.
 For environment-only smoke testing:
 
     Set-Location highway-rl-decision-making
-    python scripts\mtm_laneless_smoke.py --help
+    python -m scripts.ops.mtm_laneless_smoke --help
 
 Do not run the full 1M-transition ladder accidentally. The notebook's shared
 launcher and the script CLI should be checked before enabling training.

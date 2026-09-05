@@ -47,6 +47,8 @@ For a reproducible comparison, keep fixed:
 - observation layout and target speed;
 - render horizon and output suffix.
 
-The implementation entry points are render_policy_scenarios.py for annotated
-comparisons, render_laneless_policy_scenario.py for one live scene, and
-evaluate_cbf_counterfactuals.py for the common-state quantitative analysis.
+The implementation entry points are
+`scripts/rendering/render_policy_scenarios.py` for annotated comparisons,
+`scripts/rendering/render_laneless_policy_scenario.py` for one live scene, and
+`scripts/evaluation/evaluate_cbf_counterfactuals.py` for the common-state
+quantitative analysis.

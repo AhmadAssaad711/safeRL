@@ -1,7 +1,7 @@
 # Nominal PPO 50k pilot handoff
 
 The pilot is prepared but has not been started. The authoritative entry point
-is `scripts/run_nominal_ppo_parameter_pilot.py`. The notebook PPO training cell
+is `scripts/training/run_nominal_ppo_parameter_pilot.py`. The notebook PPO training cell
 now delegates to that runner, and its result cells read the runner's corrected
 fixed-timestep outputs; the legacy in-notebook PPO implementation is removed.
 
@@ -46,7 +46,7 @@ and no value-function clipping.
 From any PowerShell working directory:
 
 ```powershell
-& "<repo>\scripts\run_nominal_ppo_pilot.ps1"
+& "<repo>\scripts\ops\run_nominal_ppo_pilot.ps1"
 ```
 
 Default results go to `C:\agv_ppo_pilot_50k`. Standard output/error are kept
@@ -55,14 +55,14 @@ under `artifacts\pilot_run_logs`, outside the guarded result directory.
 Monitor once or continuously:
 
 ```powershell
-& "<repo>\scripts\monitor_nominal_ppo_pilot.ps1"
-& "<repo>\scripts\monitor_nominal_ppo_pilot.ps1" -Watch
+& "<repo>\scripts\ops\monitor_nominal_ppo_pilot.ps1"
+& "<repo>\scripts\ops\monitor_nominal_ppo_pilot.ps1" -Watch
 ```
 
 Strict resume uses only a validated callback checkpoint:
 
 ```powershell
-& "<repo>\scripts\run_nominal_ppo_pilot.ps1" -Resume
+& "<repo>\scripts\ops\run_nominal_ppo_pilot.ps1" -Resume
 ```
 
 `model_final.zip` is never silently selected as a resume source. Do not edit

@@ -31,7 +31,7 @@ directory. Every variant is paired by training seed and evaluated on the same
 scenario seeds in both raw and shielded modes.
 
 ```powershell
-python scripts/run_cbf_filter_ablation.py `
+python -m scripts.training.run_cbf_filter_ablation `
   --project-root . `
   --output-dir artifacts/cbf_factorial_200k `
   --timesteps 200000 `
@@ -56,7 +56,7 @@ command, and actually executed acceleration distinct.
 ## 2. Evaluate every actor on one common state bank
 
 ```powershell
-python scripts/evaluate_cbf_counterfactuals.py `
+python -m scripts.evaluation.evaluate_cbf_counterfactuals `
   --study-dir artifacts/cbf_factorial_200k `
   --collector-scenarios 2 `
   --collector-steps 400 `
@@ -96,7 +96,7 @@ and documents its correction-direction fallback.
 ## 3. Build the deployment report
 
 ```powershell
-python scripts/build_cbf_ablation_report.py `
+python -m scripts.reporting.build_cbf_ablation_report `
   --study-dir artifacts/cbf_factorial_200k
 ```
 
