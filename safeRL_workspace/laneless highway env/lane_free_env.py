@@ -518,6 +518,10 @@ class LaneFreeTrafficEnv(AbstractEnv):
         self._mtm_aggressiveness_stats: dict[str, float] = {}
         self._last_spawn_diagnostics: dict[str, float] = {}
         self._last_traffic_safety_diagnostics: dict[str, float] = {}
+        # A frame-local snapshot lets MTM, the traffic guard, and integration
+        # share one object-to-NumPy extraction without making cached arrays
+        # authoritative for callers that mutate vehicles directly.
+        self._active_state_arrays: dict[str, np.ndarray] | None = None
         # A wrapper owns this callback for one Gym step and clears it in a
         # finally block.  Reset clears stale state in case a caller aborted a
         # prior step midway through an exception.
@@ -970,6 +974,7 @@ class LaneFreeTrafficEnv(AbstractEnv):
         policy_ego_collision_count = 0
         policy_ego_collision = False
         for frame_index in range(frames):
+            self._active_state_arrays = self._collect_state_arrays()
             accelerations = self._compute_accelerations()
             if bool(self.config["ego_controlled"]):
                 ego_ax = self._map_action(action_array[0], "longitudinal")
@@ -1019,6 +1024,10 @@ class LaneFreeTrafficEnv(AbstractEnv):
             accelerations = self._clip_accelerations(accelerations)
             self._last_accelerations = accelerations
             self._integrate(accelerations, dt)
+            # Integration mutates the vehicle objects.  Refresh once and let
+            # collision detection and the final observation share the updated
+            # post-integration state.
+            self._active_state_arrays = self._collect_state_arrays()
             self._detect_collisions()
             policy_collision_count += int(self._last_collision_count)
             policy_active_collision_count = max(
@@ -1048,6 +1057,7 @@ class LaneFreeTrafficEnv(AbstractEnv):
         info = self._info(obs, action_array)
         if self.render_mode == "human":
             self.render()
+        self._active_state_arrays = None
         return obs, reward, terminated, truncated, info
 
     def _map_action(self, value: float, axis: str) -> float:
@@ -1061,6 +1071,61 @@ class LaneFreeTrafficEnv(AbstractEnv):
             scale = high if value >= 0.0 else abs(low)
             return value * max(scale, 1e-6)
         return low + 0.5 * (value + 1.0) * (high - low)
+
+    def _collect_state_arrays(self) -> dict[str, np.ndarray]:
+        """Collect the current vehicle state once for internal vectorized work."""
+
+        vehicles = self.road.vehicles
+        count = len(vehicles)
+        return {
+            "x": np.fromiter(
+                (float(vehicle.position[0]) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "y": np.fromiter(
+                (float(vehicle.position[1]) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "vx": np.fromiter(
+                (float(vehicle.vx) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "vy": np.fromiter(
+                (float(vehicle.vy) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "lengths": np.fromiter(
+                (float(vehicle.length) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "widths": np.fromiter(
+                (float(vehicle.width) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "desired_speeds": np.fromiter(
+                (float(vehicle.desired_speed) for vehicle in vehicles),
+                dtype=float,
+                count=count,
+            ),
+            "is_ego": np.fromiter(
+                (bool(vehicle.is_ego) for vehicle in vehicles),
+                dtype=bool,
+                count=count,
+            ),
+        }
+
+    def _current_state_arrays(self) -> dict[str, np.ndarray]:
+        """Return the active frame snapshot or a fresh snapshot for direct calls."""
+
+        if self._active_state_arrays is not None:
+            return self._active_state_arrays
+        return self._collect_state_arrays()
 
     def _compute_accelerations(self) -> np.ndarray:
         traffic_model = str(self.config.get("traffic_model", "force")).strip().lower()
@@ -1078,13 +1143,14 @@ class LaneFreeTrafficEnv(AbstractEnv):
         if count == 0:
             return accelerations
 
-        x = np.fromiter((vehicle.position[0] for vehicle in vehicles), dtype=float, count=count)
-        y = np.fromiter((vehicle.position[1] for vehicle in vehicles), dtype=float, count=count)
-        vx = np.fromiter((vehicle.vx for vehicle in vehicles), dtype=float, count=count)
-        vy = np.fromiter((vehicle.vy for vehicle in vehicles), dtype=float, count=count)
-        lengths = np.fromiter((vehicle.length for vehicle in vehicles), dtype=float, count=count)
-        widths = np.fromiter((vehicle.width for vehicle in vehicles), dtype=float, count=count)
-        desired_speeds = np.fromiter((vehicle.desired_speed for vehicle in vehicles), dtype=float, count=count)
+        state = self._current_state_arrays()
+        x = state["x"]
+        y = state["y"]
+        vx = state["vx"]
+        vy = state["vy"]
+        lengths = state["lengths"]
+        widths = state["widths"]
+        desired_speeds = state["desired_speeds"]
 
         accelerations[:, 0] = float(force["k_target_x"]) * np.tanh(
             (desired_speeds - vx) / max(float(force["sigma_x"]), 1e-6)
@@ -1149,14 +1215,15 @@ class LaneFreeTrafficEnv(AbstractEnv):
             self._last_mtm_diagnostics = {}
             return np.zeros((0, 2), dtype=float)
 
-        x = np.fromiter((vehicle.position[0] for vehicle in vehicles), dtype=float, count=count)
-        y = np.fromiter((vehicle.position[1] for vehicle in vehicles), dtype=float, count=count)
-        vx = np.fromiter((vehicle.vx for vehicle in vehicles), dtype=float, count=count)
-        vy = np.fromiter((vehicle.vy for vehicle in vehicles), dtype=float, count=count)
-        lengths = np.fromiter((vehicle.length for vehicle in vehicles), dtype=float, count=count)
-        widths = np.fromiter((vehicle.width for vehicle in vehicles), dtype=float, count=count)
-        desired_speeds = np.fromiter((vehicle.desired_speed for vehicle in vehicles), dtype=float, count=count)
-        is_ego = np.fromiter((vehicle.is_ego for vehicle in vehicles), dtype=bool, count=count)
+        state = self._current_state_arrays()
+        x = state["x"]
+        y = state["y"]
+        vx = state["vx"]
+        vy = state["vy"]
+        lengths = state["lengths"]
+        widths = state["widths"]
+        desired_speeds = state["desired_speeds"]
+        is_ego = state["is_ego"]
 
         parameter_names = (
             "theta",
@@ -1562,32 +1629,13 @@ class LaneFreeTrafficEnv(AbstractEnv):
             dtype=bool,
         )
 
-        x = np.fromiter(
-            (float(vehicle.position[0]) for vehicle in vehicles),
-            dtype=float,
-            count=count,
-        )
-        y = np.fromiter(
-            (float(vehicle.position[1]) for vehicle in vehicles),
-            dtype=float,
-            count=count,
-        )
-        vx = np.fromiter(
-            (float(vehicle.vx) for vehicle in vehicles), dtype=float, count=count
-        )
-        vy = np.fromiter(
-            (float(vehicle.vy) for vehicle in vehicles), dtype=float, count=count
-        )
-        lengths = np.fromiter(
-            (float(vehicle.length) for vehicle in vehicles),
-            dtype=float,
-            count=count,
-        )
-        widths = np.fromiter(
-            (float(vehicle.width) for vehicle in vehicles),
-            dtype=float,
-            count=count,
-        )
+        state = self._current_state_arrays()
+        x = state["x"]
+        y = state["y"]
+        vx = state["vx"]
+        vy = state["vy"]
+        lengths = state["lengths"]
+        widths = state["widths"]
 
         # Matrix rows are followers and columns are leaders.  Keeping this
         # calculation vectorized is essential: the 55-vehicle experiment has
@@ -1997,7 +2045,7 @@ class LaneFreeTrafficEnv(AbstractEnv):
         road_width = float(self.config["road_width"])
         max_speed = float(self.config["bounds"]["max_speed"])
         lateral_ratio = float(self.config["bounds"]["max_lateral_speed_ratio"])
-        old_x = np.array([vehicle.position[0] for vehicle in self.road.vehicles], dtype=float)
+        old_x = self._current_state_arrays()["x"].copy()
         boundary_violations = 0
 
         for vehicle, (ax, ay) in zip(self.road.vehicles, accelerations):
@@ -2025,19 +2073,11 @@ class LaneFreeTrafficEnv(AbstractEnv):
     def _detect_collisions(self) -> None:
         vehicles = self.road.vehicles
         count = len(vehicles)
-        snapshots = np.full((count, 4), np.nan, dtype=float)
-        is_ego = np.zeros(count, dtype=bool)
-        for index, vehicle in enumerate(vehicles):
-            is_ego[index] = bool(vehicle.is_ego)
-            try:
-                snapshots[index] = (
-                    float(vehicle.position[0]),
-                    float(vehicle.position[1]),
-                    float(vehicle.length),
-                    float(vehicle.width),
-                )
-            except (TypeError, ValueError, IndexError):
-                continue
+        state = self._current_state_arrays()
+        snapshots = np.column_stack(
+            (state["x"], state["y"], state["lengths"], state["widths"])
+        )
+        is_ego = state["is_ego"]
 
         valid = np.all(np.isfinite(snapshots), axis=1)
         x, y, lengths, widths = snapshots.T
@@ -2088,18 +2128,15 @@ class LaneFreeTrafficEnv(AbstractEnv):
             return rows.reshape(-1)
 
         count = len(vehicles)
-        x = np.fromiter((vehicle.position[0] for vehicle in vehicles), dtype=float, count=count)
-        y = np.fromiter((vehicle.position[1] for vehicle in vehicles), dtype=float, count=count)
-        vx = np.fromiter((vehicle.vx for vehicle in vehicles), dtype=float, count=count)
-        vy = np.fromiter((vehicle.vy for vehicle in vehicles), dtype=float, count=count)
+        state = self._current_state_arrays()
+        x = state["x"]
+        y = state["y"]
+        vx = state["vx"]
+        vy = state["vy"]
         if include_vehicle_dimensions:
-            lengths = np.fromiter(
-                (vehicle.length for vehicle in vehicles), dtype=float, count=count
-            )
-            widths = np.fromiter(
-                (vehicle.width for vehicle in vehicles), dtype=float, count=count
-            )
-        desired_speeds = np.fromiter((vehicle.desired_speed for vehicle in vehicles), dtype=float, count=count)
+            lengths = state["lengths"]
+            widths = state["widths"]
+        desired_speeds = state["desired_speeds"]
         ego_index = next((index for index, vehicle in enumerate(vehicles) if vehicle is ego), 0)
 
         road_length = float(self.config["road_length"])
