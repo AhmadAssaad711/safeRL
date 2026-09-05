@@ -80,7 +80,7 @@ def find_project_root(start: Path | None) -> Path:
         for candidate in [start.resolve(), *start.resolve().parents]:
             if (candidate / "notebooks" / "lanelessKaralakou.ipynb").exists():
                 return candidate
-            nested = candidate / "highway-rl-decision-making"
+            nested = candidate / "safeRL_workspace"
             if (nested / "notebooks" / "lanelessKaralakou.ipynb").exists():
                 return nested
     script_path = Path(__file__).resolve()
