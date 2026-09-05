@@ -252,7 +252,12 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 else result.active_indices.copy()
             ),
             "constraint_hash": str(system["hash"]),
-            "system": copy.deepcopy(system),
+            # Constraint systems are freshly constructed for each observation
+            # or physics substep and are never mutated after this record is
+            # created.  Keep a short-lived reference here; deep-copying all
+            # row/bound/geometry arrays at 100 Hz dominated diagnostic work
+            # without changing the public info payload.
+            "system": system,
         }
 
     @staticmethod
@@ -387,7 +392,11 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
 
         if not substeps:
             return record
-        aggregate = copy.deepcopy(record)
+        # Records are internal and the system reference is immutable for the
+        # lifetime of this policy step.  A shallow copy avoids cloning every
+        # substep's full constraint matrix while preserving all scalar/array
+        # values that are replaced below.
+        aggregate = dict(record)
         normalized = np.asarray(
             [step.get("correction_norm_normalized", 0.0) for step in substeps],
             dtype=float,
@@ -450,7 +459,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             last.get("active_indices", ()), dtype=np.int64
         )
         aggregate["constraint_hash"] = str(last.get("constraint_hash", ""))
-        aggregate["system"] = copy.deepcopy(last["system"])
+        aggregate["system"] = last["system"]
         aggregate["projection_source"] = "substep_active_set_2d"
         safe_violations = np.asarray(
             [step.get("max_constraint_violation_safe", np.nan) for step in substeps],
