@@ -26,6 +26,7 @@ def _signature_namespace() -> dict[str, object]:
         "CBF_EPS_SIDE": 0.10,
         "CBF_K0": 5.29,
         "CBF_K1": 3.68,
+        "CBF_PSI1_GAIN": 2.3,
         "CBF_NEIGHBOR_RANGE": 90.0,
         "CBF_MAX_NEIGHBOR_CONSTRAINTS": 12,
         "CBF_QP_FEASIBILITY_TOL": 1e-3,
@@ -171,6 +172,11 @@ def test_progression_contains_the_required_causal_controls():
         (True, True): "ppo_cbf_projected",
     }
     assert progression.EVALUATION_MODES == ("raw", "cbf")
+
+
+def test_training_signature_records_separate_critical_psi1_gain():
+    signature = _training_signature()
+    assert signature["cbf"]["CBF_PSI1_GAIN"] == 2.3
 
 
 def test_ten_kpi_summary_has_exactly_ten_rows_per_deployment():
@@ -971,7 +977,7 @@ def test_notebook_primary_ladder_is_ppo_first_and_streams_inline():
     assert "Canonical 1M PPO study" in sources["959ff31d"]
     assert "Canonical 1M PPO" in sources["26a35305"]
     launcher = sources["eb9eade5"]
-    assert "run_ppo_cbf_progression.py" in launcher
+    assert "scripts.training.run_ppo_cbf_progression" in launcher
     assert "PPO_1M_RUN_TRAINING" in launcher
     assert "PPO_1M_FORCE_RETRAIN" in launcher
     assert "PPO_1M_REQUIRE_CUDA = True" in launcher
