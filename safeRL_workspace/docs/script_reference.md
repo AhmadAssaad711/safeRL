@@ -32,7 +32,7 @@ The normal execution order is:
     notebook definitions -> environment or policy adapter -> training/evaluation
     -> registry and artifacts -> audit or plot/report
 
-Run commands from the highway-rl-decision-making directory. Most scripts accept
+Run commands from the `safeRL_workspace` directory. Most scripts accept
 --help before importing optional training dependencies.
 
     python -m scripts.ops.mtm_laneless_smoke --help
@@ -72,7 +72,10 @@ not silently replace them with lane-indexed highway-v0 assumptions.
 - Physical action: longitudinal acceleration and lateral target or control
   components bounded by the notebook configuration.
 - Safety: HOCBF constraints are evaluated in physical action space and then
-  mapped back to the policy action space.
+  mapped back to the policy action space. For the critical `(k1, k0) =
+  (4.6, 5.29)` alternative, reset and occupancy monitoring use the separate
+  first-level condition `psi1 = h_dot + 2.3 h`; `k1=4.6` is retained for the
+  second-order `psi2` condition.
 - Evaluation: strict collision-free one-kilometre completion, 3,000 policy-step
   budget, and the ten canonical KPI fields. PPO reports distance completion in
   addition to the ten-field table.

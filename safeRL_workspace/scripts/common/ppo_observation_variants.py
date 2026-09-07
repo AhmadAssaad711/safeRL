@@ -49,13 +49,12 @@ def install_previous_action_observation(namespace: dict[str, Any]) -> None:
         ) -> np.ndarray:
             """Return the final physical acceleration actually integrated.
 
-            In a CBF rollout the action handed to the simulator is the raw
-            policy command, whereas the 100 Hz filter may execute a different
-            safe acceleration at every substep.  The at-1 observation must
-            report the last of those *executed* commands, not the stale raw
-            policy request.  The lane-free traffic guard never rewrites a
-            controlled ego acceleration, so ``_last_accelerations[0]`` is the
-            authoritative final physics-frame value.
+            The at-1 observation must report the last *executed* command,
+            whether the configured CBF runs once per policy step or through
+            an explicitly enabled physics-rate callback.  The lane-free
+            traffic guard never rewrites a controlled ego acceleration, so
+            ``_last_accelerations[0]`` is the authoritative final
+            physics-frame value.
             """
 
             accelerations = np.asarray(

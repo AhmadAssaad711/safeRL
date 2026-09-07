@@ -35,12 +35,13 @@ result measures that policy plus the deployed shield.
 | Road | 380 m by 10.2 m ring | Longitudinal distance wraps around |
 | Vehicles | 55 total | One controlled ego plus surrounding traffic |
 | Neighbor rows | 5 | Nearest sensed vehicles are exposed to the policy |
-| Physics | dt = 0.01 s, 100 Hz | Ten simulator frames per policy action |
-| Policy rate | 10 Hz | One action is held for ten physics frames |
+| Physics | dt = 0.01 s, 100 Hz | Five simulator frames per policy action |
+| Policy rate | 20 Hz | One action is held for five physics frames |
+| CBF rate | 20 Hz | One hard CBF projection per policy action |
 | Acceleration bounds | ax, ay in [-3, 3] | The common physical action box |
 | Ego speed target | 16 m/s | Fixed target used by reward and observation |
 | Surrounding desired speeds | 15 to 25 m/s | Sampled traffic speed range |
-| CBF reset guard | h >= 0 and psi1 >= 0 | Safe initial ellipse and velocity condition |
+| CBF reset guard | h >= 0 and psi1 = h_dot + 2.3 h >= 0 | Critical-damping first-level condition |
 | PPO state | 32D | 30D target-y vehicle table plus 2 previous-action values |
 | Evaluation task | 1,000 m | Collision-free distance completion |
 | Evaluation timeout | 3,000 policy steps | Guard against non-progressing rollouts |
@@ -88,7 +89,7 @@ CBF-enabled run, the path is:
     policy latent output
         -> optional differentiable mean projection
         -> sampled-action hard projection
-        -> ten physics-substep HOCBF checks
+        -> one policy-rate HOCBF check
         -> LaneFreeTrafficEnv integration
 
 The raw policy command, safe command, applied command, correction, solver
@@ -190,24 +191,37 @@ does not infer a safe dry-run default from the prose alone.
 
 ## CBF geometry and filtering
 
-The CBF rows use an inflated ellipse around each rectangular vehicle:
+The pairwise CBF rows use a fixed, axis-aligned relative-position ellipse.
+For the requested identical 3.6 m by 1.8 m vehicles, with 1.0 m
+longitudinal clearance and 0.5 m lateral clearance, the semi-axes are:
 
-    a = length / sqrt(2) + 2*eps_side
-    b = width  / sqrt(2) + 2*eps_side
+    A = 3.6 + 1.0 = 4.6 m
+    B = 1.8 + 0.5 = 2.3 m
 
-For a relative centerline displacement, the ellipse boundary radius is
-computed along the displacement ray. The pairwise barrier is:
+The barrier is:
 
-    h = ellipse_radius - required_centerline_distance
+    h(dx, dy) = dx^2 / 4.6^2 + dy^2 / 2.3^2 - 1
 
-The HOCBF condition uses:
+Thus `h >= 0` is the collision-free side of the relative-position ellipse;
+its full axis lengths are 9.2 m longitudinally and 4.6 m laterally. The
+relative coordinates are axis-aligned, so vehicle headings and per-vehicle
+dimensions do not alter this pairwise barrier. `eps_side` remains accepted
+for compatibility and provenance, but is not applied to this fixed geometry.
+The shared implementation uses the exact gradient and Hessian of this
+quadratic barrier. The simulator's existing physical body configuration is
+still `3.5 m x 1.8 m`; the requested `3.6 m x 1.8 m` values define this CBF
+relative geometry and do not change collision detection body sizes.
 
-    psi1 = h_dot + k1*h
+For the critical-damping alternative `(k1, k0) = (4.6, 5.29)`, the two
+levels are:
+
+    psi1 = h_dot + 2.3*h
     psi2 = h_ddot + k1*h_dot + k0*h >= 0
 
-The canonical notebook values are eps_side = 0.10, k0 = 5.29, k1 = 3.68,
+The canonical notebook default remains eps_side = 0.10, k0 = 5.29, k1 = 3.68,
 neighbor range = 90 m, maximum neighbor constraints = 12, and feasibility
-tolerance = 1e-3.
+tolerance = 1e-3. Critical-gain runs override the HOCBF `k1` to 4.6; they
+continue to use the separate first-level gain `psi1_gain = 2.3`.
 
 The filter adds pairwise neighbor rows and lateral boundary rows to a
 two-dimensional linear constraint system. It first tests whether the raw
@@ -216,10 +230,15 @@ polytope using the exact active-set 2D path. OSQP is retained as a numerical
 fallback for degenerate cases. If no feasible result is available, the
 least-violating bounded action and then an evasive emergency action are used.
 
-The reset guard checks h and psi1 before the first action. The runtime guard
-records the minimum h, h_dot, HOCBF margin, maximum constraint violation,
-projection solver, QP status, and fallback status. CBF-enabled notebook runs
-recompute the shield at all ten simulator substeps.
+The reset guard checks h and `psi1 = h_dot + psi1_gain*h` before the first
+action. The runtime monitor records `psi1_min` using the same `psi1_gain`,
+alongside the minimum h, h_dot, HOCBF margin, maximum constraint violation,
+projection solver, QP status, and fallback status. The canonical notebook
+configuration sets `simulation_frequency=100`, `policy_frequency=20`, and
+`cbf_frequency=20`; consequently, the hard shield is evaluated once at the
+policy boundary and the selected action is held for five physics frames.
+The optional `cbf_substep_filtering` callback is reserved for an explicitly
+physics-rate CBF run and must then declare `cbf_frequency=100`.
 
 ## Evaluation and KPI protocol
 
@@ -296,7 +315,7 @@ configuration and hashes for provenance, not the absolute path.
 
 ### Environment smoke test
 
-    Set-Location highway-rl-decision-making
+    Set-Location safeRL_workspace
     python -m scripts.ops.mtm_laneless_smoke --run-dir <source-run> --output-dir <output>
 
 The smoke runner compares force and MTM surrounding traffic without launching

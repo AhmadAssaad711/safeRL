@@ -43,7 +43,7 @@ For a reproducible comparison, keep fixed:
 
 - scenario ordering and seeds;
 - road, vehicle dimensions, and MTM profile mix;
-- CBF gains, ellipse inflation, and action bounds;
+- CBF gains, fixed relative-position ellipse, and action bounds;
 - observation layout and target speed;
 - render horizon and output suffix.
 

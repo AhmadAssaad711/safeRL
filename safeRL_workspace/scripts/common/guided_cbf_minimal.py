@@ -18,6 +18,11 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import polyak_update
 
+from scripts.common.cbf_geometry import (
+    CBF_RELATIVE_ELLIPSE_A,
+    CBF_RELATIVE_ELLIPSE_B,
+)
+
 
 def _actor_gradient_diagnostics(
     actor: th.nn.Module,
@@ -1267,20 +1272,18 @@ class GuidedCBFDDPG(DDPG):
         other_length: th.Tensor,
         other_width: th.Tensor,
     ) -> th.Tensor:
-        eps = th.as_tensor(1e-6, device=px.device, dtype=px.dtype)
-        radius = th.sqrt(px.square() + py.square() + eps)
-        phi = th.atan2(py, px)
-
-        def inflated_radius(length: th.Tensor, width: th.Tensor) -> th.Tensor:
-            a = length / np.sqrt(2.0) + 2.0 * self.cbf_eps_side
-            b = width / np.sqrt(2.0) + 2.0 * self.cbf_eps_side
-            cos_phi = th.cos(phi)
-            sin_phi = th.sin(phi)
-            denom = th.sqrt((b * cos_phi).square() + (a * sin_phi).square() + eps)
-            return a * b / th.clamp(denom, min=1e-6)
-
-        required = inflated_radius(ego_length, ego_width) + inflated_radius(other_length, other_width)
-        return radius - required
+        del ego_length, ego_width, other_length, other_width
+        a = th.as_tensor(
+            CBF_RELATIVE_ELLIPSE_A,
+            device=px.device,
+            dtype=px.dtype,
+        )
+        b = th.as_tensor(
+            CBF_RELATIVE_ELLIPSE_B,
+            device=px.device,
+            dtype=px.dtype,
+        )
+        return (px / a).square() + (py / b).square() - 1.0
 
     def _neighbor_constraint_from_obs(
         self,
@@ -1291,40 +1294,32 @@ class GuidedCBFDDPG(DDPG):
         other = obs_rows[:, neighbor_index, :]
         dtype = obs_rows.dtype
         device = obs_rows.device
-        fd = th.as_tensor(self.cbf_projection_fd_step, device=device, dtype=dtype)
 
-        ego_y = 0.5 * self.cbf_road_width * (ego[:, 0] + 1.0)
         ego_vx = ego[:, 2] * self.cbf_obs_vmax
         ego_vy = ego[:, 3] * self.cbf_obs_vymax
-        ego_length = th.clamp(ego[:, 4] * 5.15, min=1e-3)
-        ego_width = th.clamp(ego[:, 5] * 1.84, min=1e-3)
 
         dx = other[:, 0] * self.cbf_sensing_range
         dy = other[:, 1] * self.cbf_road_width
         other_vx = other[:, 2] * self.cbf_obs_vmax
         other_vy = other[:, 3] * self.cbf_obs_vymax
-        other_length = th.clamp(other[:, 4] * 5.15, min=1e-3)
-        other_width = th.clamp(other[:, 5] * 1.84, min=1e-3)
         valid = (other[:, 4] > 1e-4) & (other[:, 5] > 1e-4)
 
-        def h_at(x: th.Tensor, y: th.Tensor) -> th.Tensor:
-            return self._ellipse_clearance_from_obs(x, y, ego_length, ego_width, other_length, other_width)
-
-        h0 = h_at(dx, dy)
-        h_px = h_at(dx + fd, dy)
-        h_mx = h_at(dx - fd, dy)
-        h_py = h_at(dx, dy + fd)
-        h_my = h_at(dx, dy - fd)
-        h_pp = h_at(dx + fd, dy + fd)
-        h_pm = h_at(dx + fd, dy - fd)
-        h_mp = h_at(dx - fd, dy + fd)
-        h_mm = h_at(dx - fd, dy - fd)
-
-        grad_x = (h_px - h_mx) / (2.0 * fd)
-        grad_y = (h_py - h_my) / (2.0 * fd)
-        h_xx = (h_px - 2.0 * h0 + h_mx) / fd.square()
-        h_yy = (h_py - 2.0 * h0 + h_my) / fd.square()
-        h_xy = (h_pp - h_pm - h_mp + h_mm) / (4.0 * fd.square())
+        a = th.as_tensor(
+            CBF_RELATIVE_ELLIPSE_A,
+            device=device,
+            dtype=dtype,
+        )
+        b = th.as_tensor(
+            CBF_RELATIVE_ELLIPSE_B,
+            device=device,
+            dtype=dtype,
+        )
+        h0 = (dx / a).square() + (dy / b).square() - 1.0
+        grad_x = 2.0 * dx / a.square()
+        grad_y = 2.0 * dy / b.square()
+        h_xx = th.full_like(h0, 2.0 / float(CBF_RELATIVE_ELLIPSE_A) ** 2)
+        h_yy = th.full_like(h0, 2.0 / float(CBF_RELATIVE_ELLIPSE_B) ** 2)
+        h_xy = th.zeros_like(h0)
 
         dvx = other_vx - ego_vx
         dvy = other_vy - ego_vy

@@ -61,7 +61,7 @@ from scripts.training.train_safety_potential_variants import MTM_CONGESTED_UNCER
 
 warnings.filterwarnings("ignore", message="OSQP exited.*")
 
-PIPELINE_SCHEMA_VERSION = 4
+PIPELINE_SCHEMA_VERSION = 5
 CHECKPOINT_PAYLOADS = {
     "model": "model.zip",
     "replay_buffer": "replay.pkl",
@@ -1274,6 +1274,7 @@ def make_cbf_env(
         eps_side=float(eps_side),
         k0=float(k0),
         k1=float(k1),
+        psi1_gain=float(namespace.get("CBF_PSI1_GAIN", 2.3)),
     )
     if namespace.get("NORMALIZE_RL_OBSERVATIONS", False):
         env = namespace["LaneFreeObservationNormalizationWrapper"](env, clip=namespace["OBSERVATION_CLIP"])
@@ -1465,6 +1466,7 @@ def training_config_payload(
         "cbf": {
             "k0": float(args.k0),
             "k1": float(args.k1),
+            "psi1_gain": float(args.psi1_gain),
             "eps_side": float(args.eps_side),
             "correction_epsilon": float(args.correction_epsilon),
             "lambda_delta": float(spec["lambda_delta"]),
@@ -2124,13 +2126,30 @@ def cbf_state_occupancy_metrics(
     env: gym.Env,
     *,
     eps_side: float,
+    psi1_gain: float | None = None,
     ttc_cap_s: float = 30.0,
 ) -> dict[str, float]:
-    """Compute pre-action occupancy diagnostics for one exact simulator state."""
+    """Compute pre-action occupancy diagnostics for one exact simulator state.
+
+    The first-level barrier is monitored independently of the HOCBF damping
+    coefficient: ``psi_1 = h_dot + psi1_gain * h``.  In the critical
+    alternative, ``psi1_gain = 2.3`` while ``CBF_K1 = 4.6`` remains the
+    coefficient of ``h_dot`` in ``psi_2``.
+    """
+
+    active_psi1_gain = float(
+        namespace.get("CBF_PSI1_GAIN", 2.3)
+        if psi1_gain is None
+        else psi1_gain
+    )
+    if not np.isfinite(active_psi1_gain) or active_psi1_gain <= 0.0:
+        raise ValueError("psi1_gain must be finite and positive")
 
     result = {
         "h_min": np.nan,
         "h_dot": np.nan,
+        "psi1_min": np.nan,
+        "psi1_gain": active_psi1_gain,
         "ttc_cbf_linearized_s": np.nan,
         "vehicle_spacing_m": np.nan,
         "surface_clearance_m": np.nan,
@@ -2197,6 +2216,9 @@ def cbf_state_occupancy_metrics(
         active_h, active_h_dot = min(h_and_dot, key=lambda pair: pair[0])
         result["h_min"] = float(active_h)
         result["h_dot"] = float(active_h_dot)
+        result["psi1_min"] = float(
+            min(h_dot + active_psi1_gain * h for h, h_dot in h_and_dot)
+        )
         result["ttc_cbf_linearized_s"] = linearized_ttc_from_barriers(
             h_and_dot,
             cap_s=float(ttc_cap_s),
@@ -2239,6 +2261,7 @@ def evaluate_scenario(
         speed_errors: list[float] = []
         jerk_norms: list[float] = []
         h_values: list[float] = []
+        psi1_values: list[float] = []
         h_dot_values: list[float] = []
         ttc_values: list[float] = []
         vehicle_spacings: list[float] = []
@@ -2350,6 +2373,7 @@ def evaluate_scenario(
                 namespace,
                 env,
                 eps_side=float(args.eps_side),
+                psi1_gain=float(namespace.get("CBF_PSI1_GAIN", 2.3)),
                 ttc_cap_s=float(getattr(args, "ttc_cap", 30.0)),
             )
             shadow_safe_phys = np.asarray(raw_phys, dtype=np.float32).reshape(-1)[:2]
@@ -2514,6 +2538,7 @@ def evaluate_scenario(
                     jerk_norms.append(float(np.linalg.norm(acceleration - previous_acceleration) / max(policy_dt, 1e-6)))
                 previous_acceleration = acceleration.copy()
             h_values.append(_as_float(pre_state_metrics.get("h_min")))
+            psi1_values.append(_as_float(pre_state_metrics.get("psi1_min")))
             h_dot_values.append(_as_float(pre_state_metrics.get("h_dot")))
             ttc_values.append(
                 float(pre_state_metrics.get("ttc_cbf_linearized_s", np.inf))
@@ -2786,6 +2811,12 @@ def evaluate_scenario(
             "event_without_active_collision": int(event_without_active_collision),
             "h_min": _min(h_values),
             "h_violation_rate": _mean([float(value < 0.0) for value in _finite(h_values).tolist()], default=np.nan),
+            "psi1_min": _min(psi1_values),
+            "psi1_gain": float(namespace.get("CBF_PSI1_GAIN", 2.3)),
+            "psi1_violation_rate": _mean(
+                [float(value < 0.0) for value in _finite(psi1_values).tolist()],
+                default=np.nan,
+            ),
             "near_boundary_h_threshold": near_boundary_threshold,
             "near_boundary_steps": near_boundary_steps,
             "near_boundary_rate": float(near_boundary_steps / max(len(rewards), 1)),
@@ -3522,6 +3553,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-horizon", type=int, default=800, help=argparse.SUPPRESS)
     parser.add_argument("--k0", type=float, default=5.29)
     parser.add_argument("--k1", type=float, default=3.68)
+    parser.add_argument(
+        "--psi1-gain",
+        type=float,
+        default=2.3,
+        help="First-level CBF gain in psi1 = h_dot + psi1_gain*h.",
+    )
     parser.add_argument("--eps-side", type=float, default=0.10)
     parser.add_argument("--lambda-delta", type=float, default=0.025)
     parser.add_argument("--lambda-intervention", type=float, default=0.02)
@@ -3579,6 +3616,7 @@ def main() -> int:
     namespace["DEVICE"] = args.device
     namespace["CBF_K0"] = float(args.k0)
     namespace["CBF_K1"] = float(args.k1)
+    namespace["CBF_PSI1_GAIN"] = float(args.psi1_gain)
     namespace["CBF_EPS_SIDE"] = float(args.eps_side)
     namespace["CBF_FILTER_REWARD_LAMBDA"] = 0.0
     install_minimal_guided_cbf(namespace)
@@ -3612,6 +3650,7 @@ def main() -> int:
         "reward_config": reward_config,
         "k0": float(args.k0),
         "k1": float(args.k1),
+        "psi1_gain": float(args.psi1_gain),
         "eps_side": float(args.eps_side),
         "near_boundary_h": float(args.near_boundary_h),
         "ttc_cap_s": float(args.ttc_cap),
@@ -3636,6 +3675,7 @@ def main() -> int:
         "base_reward_config": reward_config,
         "k0": float(args.k0),
         "k1": float(args.k1),
+        "psi1_gain": float(args.psi1_gain),
         "eps_side": float(args.eps_side),
         "lambda_delta": float(args.lambda_delta),
         "lambda_intervention": float(args.lambda_intervention),

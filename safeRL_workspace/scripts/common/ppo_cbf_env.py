@@ -63,6 +63,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         k0: float,
         k1: float,
         max_neighbor_constraints: Optional[int],
+        psi1_gain: Optional[float] = None,
         base_observation_dim: Optional[int] = None,
         max_constraints: int = 18,
         project_inputs: bool = False,
@@ -82,6 +83,13 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         self.eps_side = float(eps_side)
         self.k0 = float(k0)
         self.k1 = float(k1)
+        self.psi1_gain = float(
+            namespace.get("CBF_PSI1_GAIN", 2.3)
+            if psi1_gain is None
+            else psi1_gain
+        )
+        if not np.isfinite(self.psi1_gain) or self.psi1_gain <= 0.0:
+            raise ValueError("psi1_gain must be finite and positive")
         self.max_neighbor_constraints = (
             None
             if max_neighbor_constraints is None
@@ -350,7 +358,13 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         )
 
     def _initial_safety_diagnostics(self) -> dict[str, Any]:
-        """Check h >= 0 and psi_1 = h_dot + k1 h >= 0 at reset."""
+        """Check h >= 0 and psi_1 = h_dot + 2.3 h >= 0 at reset.
+
+        ``self.k1`` is the coefficient of ``h_dot`` in the second-order
+        HOCBF condition.  It is intentionally not reused here: under the
+        critical alternative ``(k1, k0) = (4.6, 5.29)``, the first-level
+        factor is ``sqrt(k0) = 2.3``.
+        """
 
         ego = self.namespace["get_ego_state"](self)
         neighbors = self.namespace["get_neighbor_states"](
@@ -377,7 +391,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                     @ np.asarray([dvx, dvy], dtype=float)
                 )
                 h_values.append(h_value)
-                psi_values.append(h_dot + self.k1 * h_value)
+                psi_values.append(h_dot + self.psi1_gain * h_value)
 
         base = self.namespace["_lane_free_base"](self)
         road_width = float(base.config["road_width"])
@@ -387,8 +401,8 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         h_values.extend([left_h, right_h])
         psi_values.extend(
             [
-                float(ego["vy"] + self.k1 * left_h),
-                float(-ego["vy"] + self.k1 * right_h),
+                float(ego["vy"] + self.psi1_gain * left_h),
+                float(-ego["vy"] + self.psi1_gain * right_h),
             ]
         )
         min_h = float(np.min(h_values)) if h_values else np.nan
@@ -402,7 +416,10 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         )
         return {
             "cbf_initial_min_h": min_h,
+            "cbf_initial_min_psi1": min_psi,
+            # Keep the historical alias for existing result readers.
             "cbf_initial_min_psi": min_psi,
+            "cbf_psi1_gain": float(self.psi1_gain),
             "cbf_initial_safe_set": safe,
         }
 
@@ -562,7 +579,8 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             raise RuntimeError(
                 "CBF reset violated h >= 0 or psi_1 >= 0: "
                 f"min_h={initial_safety['cbf_initial_min_h']:.6f}, "
-                f"min_psi={initial_safety['cbf_initial_min_psi']:.6f}"
+                f"min_psi1={initial_safety['cbf_initial_min_psi1']:.6f} "
+                f"(gain={self.psi1_gain:.6f})"
             )
         info["cbf_constraint_hash"] = str(system["hash"])
         info["cbf_constraint_count"] = int(system["rows"].shape[0])
@@ -707,6 +725,16 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 "cbf_callback_evaluation_count": int(
                     record.get("substep_count", 0)
                 ),
+                "cbf_update_count": int(
+                    record.get("substep_count", 0)
+                    if use_substep_filter
+                    else bool(record.get("cbf_applied", False))
+                ),
+                "cbf_execution_schedule": (
+                    "physics_substep"
+                    if use_substep_filter
+                    else ("policy" if bool(record.get("cbf_applied", False)) else "none")
+                ),
                 "cbf_substep_intervention_steps": int(
                     record.get("substep_intervention_steps", 0)
                 ),
@@ -739,6 +767,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 "cbf_hocbf_reward_lambda": float(self.hocbf_reward_lambda),
                 "cbf_hocbf_reward_scale": float(self.hocbf_reward_scale),
                 "cbf_hocbf_reward_margin": float(self.hocbf_reward_margin),
+                "cbf_psi1_gain": float(self.psi1_gain),
+                "cbf_k0": float(self.k0),
+                "cbf_k1": float(self.k1),
                 "cbf_max_constraint_violation_safe": float(
                     record["max_constraint_violation_safe"]
                 ),

@@ -112,6 +112,8 @@ def apply_overrides(namespace: dict[str, Any], args: argparse.Namespace, task: d
         namespace["CBF_K0"] = float(args.k0)
     if args.k1 is not None:
         namespace["CBF_K1"] = float(args.k1)
+    if args.psi1_gain is not None:
+        namespace["CBF_PSI1_GAIN"] = float(args.psi1_gain)
     if args.eps_side is not None:
         namespace["CBF_EPS_SIDE"] = float(args.eps_side)
 
@@ -206,6 +208,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-filter", type=float, default=None)
     parser.add_argument("--k0", type=float, default=None)
     parser.add_argument("--k1", type=float, default=None)
+    parser.add_argument("--psi1-gain", type=float, default=None)
     parser.add_argument("--eps-side", type=float, default=None)
     parser.add_argument("--traffic-model", choices=["force", "mtm"], default=None)
     parser.add_argument("--env-config-json", default=None)
@@ -275,6 +278,7 @@ def main() -> int:
             "lambda_filter": namespace.get("CBF_FILTER_REWARD_LAMBDA"),
             "k0": namespace.get("CBF_K0"),
             "k1": namespace.get("CBF_K1"),
+            "psi1_gain": namespace.get("CBF_PSI1_GAIN"),
             "eps_side": namespace.get("CBF_EPS_SIDE"),
             "traffic_model": active_traffic_model(namespace.get("ENV_CONFIG", {})),
             "artifact_suffix": normalize_artifact_suffix(args.artifact_suffix),

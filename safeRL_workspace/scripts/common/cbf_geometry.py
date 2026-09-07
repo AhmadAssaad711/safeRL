@@ -1,10 +1,10 @@
-"""Vectorized finite-difference HOCBF geometry.
+"""Vectorized relative-position HOCBF geometry.
 
-The canonical notebook historically evaluated the centerline clearance one
-neighbor at a time.  This module keeps the same nine-point finite-difference
-stencil and ellipse-radius equations, but evaluates a batch of neighbors in
-NumPy.  It intentionally has no dependency on notebook state so spawned
-workers and direct notebook execution can share the implementation.
+The pairwise safety set is a fixed, axis-aligned relative-position ellipse.
+For the requested 3.6 m by 1.8 m vehicles and the specified clearances, its
+semi-axes are 4.6 m longitudinally and 2.3 m laterally.  This module keeps
+the shared batch implementation independent of notebook state so spawned
+workers and direct notebook execution use the same barrier and derivatives.
 """
 
 from __future__ import annotations
@@ -12,6 +12,12 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import numpy as np
+
+
+# These are relative-position semi-axes, not the physical dimensions of the
+# simulator bodies.  The corresponding full axes are 9.2 m and 4.6 m.
+CBF_RELATIVE_ELLIPSE_A = 4.6
+CBF_RELATIVE_ELLIPSE_B = 2.3
 
 
 def _wrapped_signed_dx(raw_dx: float, road_length: Optional[float]) -> float:
@@ -45,24 +51,34 @@ def _relative_state(
     )
 
 
-def _inflated_axes(
-    length: np.ndarray | float,
-    width: np.ndarray | float,
-    eps_side: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    a = np.maximum(
-        np.asarray(length, dtype=float) / np.sqrt(2.0) + 2.0 * float(eps_side),
-        1e-6,
-    )
-    b = np.maximum(
-        np.asarray(width, dtype=float) / np.sqrt(2.0) + 2.0 * float(eps_side),
-        1e-6,
-    )
-    return a, b
+def _fixed_ellipse_values(
+    points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``h``, center distance, and the two directional radii.
 
+    ``points`` may have any leading shape ending in ``(2,)``.  Splitting the
+    directional boundary equally between the two vehicles preserves the
+    existing ``l_ego + l_other`` diagnostic while making the barrier itself
+    the requested relative-position ellipse.
+    """
 
-def _wrap_angle(angle: np.ndarray) -> np.ndarray:
-    return (np.asarray(angle, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
+    points = np.asarray(points, dtype=float)
+    dx = points[..., 0]
+    dy = points[..., 1]
+    h = (
+        (dx / float(CBF_RELATIVE_ELLIPSE_A)) ** 2
+        + (dy / float(CBF_RELATIVE_ELLIPSE_B)) ** 2
+        - 1.0
+    )
+    radius = np.hypot(dx, dy)
+    phi = np.where(radius < 1e-9, 0.0, np.arctan2(dy, dx))
+    direction_denom = np.sqrt(
+        (np.cos(phi) / float(CBF_RELATIVE_ELLIPSE_A)) ** 2
+        + (np.sin(phi) / float(CBF_RELATIVE_ELLIPSE_B)) ** 2
+    )
+    boundary_radius = 1.0 / np.maximum(direction_denom, 1e-12)
+    half_boundary_radius = 0.5 * boundary_radius
+    return h, radius, half_boundary_radius, half_boundary_radius
 
 
 def _clearance_batch(
@@ -76,39 +92,23 @@ def _clearance_batch(
     other_headings: np.ndarray,
     eps_side: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Evaluate clearance for ``(neighbor, stencil_point, xy)`` points."""
+    """Evaluate the fixed ellipse for ``(neighbor, stencil_point, xy)`` points.
 
-    points = np.asarray(points, dtype=float)
-    radius = np.linalg.norm(points, axis=-1)
-    phi = np.where(
-        radius < 1e-9,
-        0.0,
-        np.arctan2(points[..., 1], points[..., 0]),
-    )
-    ego_a, ego_b = _inflated_axes(ego_length, ego_width, eps_side)
-    other_a, other_b = _inflated_axes(
-        other_lengths[:, None], other_widths[:, None], eps_side
-    )
+    The vehicle dimensions, headings, and ``eps_side`` arguments remain in
+    the signature for compatibility with existing callers and manifests, but
+    they do not alter this fixed relative-position geometry.
+    """
 
-    ego_delta = _wrap_angle(phi - float(ego_heading))
-    other_delta = _wrap_angle(phi - other_headings[:, None])
-    ego_cos = np.cos(ego_delta)
-    ego_sin = np.sin(ego_delta)
-    other_cos = np.cos(other_delta)
-    other_sin = np.sin(other_delta)
-    ego_denom = np.sqrt((ego_b * ego_cos) ** 2 + (ego_a * ego_sin) ** 2)
-    other_denom = np.sqrt(
-        (other_b * other_cos) ** 2 + (other_a * other_sin) ** 2
+    del (
+        ego_length,
+        ego_width,
+        ego_heading,
+        other_lengths,
+        other_widths,
+        other_headings,
+        eps_side,
     )
-    ego_radius = ego_a * ego_b / np.maximum(ego_denom, 1e-9)
-    other_radius = other_a * other_b / np.maximum(other_denom, 1e-9)
-    required_distance = ego_radius + other_radius
-    return (
-        radius - required_distance,
-        radius,
-        ego_radius,
-        other_radius,
-    )
+    return _fixed_ellipse_values(points)
 
 
 def batch_centerline_barrier_derivatives(
@@ -119,12 +119,12 @@ def batch_centerline_barrier_derivatives(
     eps_side: float,
     fd_step: float = 1e-3,
 ) -> dict[str, np.ndarray]:
-    """Return the notebook's finite-difference geometry for many neighbors.
+    """Return the analytic fixed-ellipse geometry for many neighbors.
 
     ``points`` contains each neighbor's relative ``[dx, dy]`` position and
     must have shape ``(N, 2)``.  The returned arrays retain one row per input
-    neighbor and use the same central differences as
-    ``centerline_barrier_derivatives``.
+    neighbor.  ``fd_step`` is retained for API compatibility but is not used
+    because the requested quadratic barrier has exact derivatives.
     """
 
     p = np.asarray(points, dtype=float).reshape(-1, 2)
@@ -143,81 +143,24 @@ def batch_centerline_barrier_derivatives(
             "l_other": np.empty(0, dtype=float),
         }
 
-    other_lengths = np.asarray(
-        [float(item["length"]) for item in neighbors], dtype=float
-    )
-    other_widths = np.asarray(
-        [float(item["width"]) for item in neighbors], dtype=float
-    )
-    other_headings = np.asarray(
-        [float(item.get("heading", 0.0)) for item in neighbors], dtype=float
-    )
-    step = float(fd_step)
-    offsets = np.asarray(
-        [
-            [0.0, 0.0],
-            [step, 0.0],
-            [-step, 0.0],
-            [0.0, step],
-            [0.0, -step],
-            [step, step],
-            [step, -step],
-            [-step, step],
-            [-step, -step],
-        ],
-        dtype=float,
-    )
-    stencil_points = p[:, None, :] + offsets[None, :, :]
-    h_values, distances, ego_radii, other_radii = _clearance_batch(
-        stencil_points,
-        ego_length=float(ego["length"]),
-        ego_width=float(ego["width"]),
-        ego_heading=float(ego.get("heading", 0.0)),
-        other_lengths=other_lengths,
-        other_widths=other_widths,
-        other_headings=other_headings,
-        eps_side=float(eps_side),
-    )
-    h0 = h_values[:, 0]
-    h_px = h_values[:, 1]
-    h_mx = h_values[:, 2]
-    h_py = h_values[:, 3]
-    h_my = h_values[:, 4]
-    h_pp = h_values[:, 5]
-    h_pm = h_values[:, 6]
-    h_mp = h_values[:, 7]
-    h_mm = h_values[:, 8]
+    del ego, neighbors, eps_side, fd_step
+    h0, distances, l_ego, l_other = _fixed_ellipse_values(p)
     grad = np.column_stack(
         [
-            (h_px - h_mx) / (2.0 * step),
-            (h_py - h_my) / (2.0 * step),
+            2.0 * p[:, 0] / float(CBF_RELATIVE_ELLIPSE_A) ** 2,
+            2.0 * p[:, 1] / float(CBF_RELATIVE_ELLIPSE_B) ** 2,
         ]
     )
-    mixed = (h_pp - h_pm - h_mp + h_mm) / (4.0 * step**2)
-    hessian = np.stack(
-        [
-            np.column_stack(
-                [
-                    (h_px - 2.0 * h0 + h_mx) / (step**2),
-                    mixed,
-                ]
-            ),
-            np.column_stack(
-                [
-                    mixed,
-                    (h_py - 2.0 * h0 + h_my) / (step**2),
-                ]
-            ),
-        ],
-        axis=1,
-    )
+    hessian = np.zeros((count, 2, 2), dtype=float)
+    hessian[:, 0, 0] = 2.0 / float(CBF_RELATIVE_ELLIPSE_A) ** 2
+    hessian[:, 1, 1] = 2.0 / float(CBF_RELATIVE_ELLIPSE_B) ** 2
     return {
         "h": h0,
         "grad": grad,
         "hessian": hessian,
-        "center_distance": distances[:, 0],
-        "l_ego": ego_radii[:, 0],
-        "l_other": other_radii[:, 0],
+        "center_distance": distances,
+        "l_ego": l_ego,
+        "l_other": l_other,
     }
 
 
@@ -288,4 +231,3 @@ def batch_pairwise_hocbf_constraints(
         "h_dot": np.asarray(h_dot, dtype=float),
         "hddot_without_ego": np.asarray(hddot_without_ego, dtype=float),
     }
-
