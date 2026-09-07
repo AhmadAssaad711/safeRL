@@ -103,3 +103,73 @@ def test_batched_hocbf_geometry_matches_scalar_notebook_reference():
                 err_msg=f"batch field {name} differs for neighbor {index}",
             )
 
+
+def test_fixed_relative_position_ellipse_axes_and_derivatives():
+    namespace = _notebook_namespace()
+    ego = {
+        "x": 0.0,
+        "y": 0.0,
+        "vx": 16.0,
+        "vy": 0.0,
+        "heading": 0.4,
+        "length": 3.5,
+        "width": 1.8,
+    }
+    other = {
+        "x": 2.3,
+        "y": 1.15,
+        "vx": 15.0,
+        "vy": 0.2,
+        "heading": -0.3,
+        "ax": 0.1,
+        "ay": -0.2,
+        "length": 8.0,
+        "width": 4.0,
+        "signed_dx": 2.3,
+    }
+
+    clearance = namespace["pairwise_centerline_clearance"]
+    h_longitudinal, _, l_ego, l_other = clearance(
+        np.asarray([4.6, 0.0]), ego, other, eps_side=0.0
+    )
+    h_lateral, _, _, _ = clearance(
+        np.asarray([0.0, 2.3]), ego, other, eps_side=100.0
+    )
+    h_center, _, _, _ = clearance(
+        np.asarray([0.0, 0.0]), ego, other, eps_side=0.1
+    )
+    np.testing.assert_allclose(h_longitudinal, 0.0, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(h_lateral, 0.0, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(h_center, -1.0, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(l_ego + l_other, 4.6, rtol=0.0, atol=1e-12)
+
+    point = np.asarray([2.3, 1.15], dtype=float)
+    h, gradient, hessian, _, _, _ = namespace[
+        "centerline_barrier_derivatives"
+    ](point, ego, other, eps_side=0.1, fd_step=0.25)
+    expected_h = (point[0] / 4.6) ** 2 + (point[1] / 2.3) ** 2 - 1.0
+    expected_gradient = np.asarray(
+        [2.0 * point[0] / 4.6**2, 2.0 * point[1] / 2.3**2]
+    )
+    expected_hessian = np.diag([2.0 / 4.6**2, 2.0 / 2.3**2])
+    np.testing.assert_allclose(h, expected_h, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(hessian, expected_hessian, rtol=0.0, atol=1e-12)
+
+    batch = namespace["batch_pairwise_hocbf_constraints"](
+        ego,
+        [other],
+        eps_side=0.1,
+        k0=5.29,
+        k1=4.6,
+    )
+    np.testing.assert_allclose(batch["h"][0], expected_h, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        batch["A"][0], expected_gradient, rtol=0.0, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        batch["required_distance"][0],
+        namespace["ellipse_radius_along_line"](4.6, 2.3, np.arctan2(1.15, 2.3)),
+        rtol=0.0,
+        atol=1e-12,
+    )

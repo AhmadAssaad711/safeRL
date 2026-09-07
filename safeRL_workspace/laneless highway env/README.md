@@ -120,7 +120,7 @@ Quick force-vs-MTM smoke comparison:
 ```powershell
 # If your shell is currently in this environment directory:
 Set-Location ..
-# The module command must run from highway-rl-decision-making.
+# The module command must run from safeRL_workspace.
 python -m scripts.ops.mtm_laneless_smoke
 ```
 

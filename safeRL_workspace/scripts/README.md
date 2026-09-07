@@ -8,7 +8,7 @@ training, evaluation, reporting, and rendering workflows.
 
 ## Run convention
 
-Run commands from `highway-rl-decision-making` with Python module syntax so
+Run commands from `safeRL_workspace` with Python module syntax so
 package imports and repository paths are initialized consistently:
 
 ```powershell

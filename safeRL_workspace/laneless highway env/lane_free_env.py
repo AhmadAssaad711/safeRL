@@ -17,6 +17,112 @@ from highway_env.road.road import Road, RoadNetwork
 
 LANE_FREE_ENV_ID = "lane-free-v0"
 
+# Fixed relative-position CBF ellipse.  These are not the physical simulator
+# body dimensions; they encode the requested 1.0 m longitudinal and 0.5 m
+# lateral clearances around the 3.6 m by 1.8 m reference vehicles.
+CBF_RELATIVE_ELLIPSE_A = 4.6
+CBF_RELATIVE_ELLIPSE_B = 2.3
+# Critical-damping first-level gain: psi_1 = h_dot + lambda_1 h.
+# This is deliberately separate from HOCBF ``k1``: for the alternative
+# (k1, k0) = (4.6, 5.29), lambda_1 = sqrt(k0) = 2.3 while k1 remains the
+# coefficient of h_dot in psi_2.
+CBF_PSI1_GAIN = 2.3
+
+
+def _whole_physics_frame_ratio(
+    physics_frequency_hz: float,
+    requested_frequency_hz: float,
+    *,
+    label: str,
+) -> int:
+    ratio = float(physics_frequency_hz) / float(requested_frequency_hz)
+    frames = int(round(ratio))
+    if frames < 1 or not np.isclose(ratio, frames, rtol=0.0, atol=1e-9):
+        raise ValueError(
+            f"{label} frequency must divide the physics frequency into whole "
+            f"frames: {physics_frequency_hz:g}/{requested_frequency_hz:g}={ratio:g}"
+        )
+    return frames
+
+
+def resolve_frequency_plan(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve and validate the physics, policy, and CBF timing contract.
+
+    ``LaneFreeTrafficEnv`` integrates with ``dt`` on every physics frame.
+    A policy-rate CBF is applied once before the environment step and its
+    action is held for the policy interval.  The optional substep callback is
+    a separate mode: when enabled, it is explicitly a physics-rate CBF and
+    therefore must declare ``cbf_frequency == simulation_frequency``.
+    """
+
+    physics_frequency_hz = float(config.get("simulation_frequency", 1.0))
+    if not np.isfinite(physics_frequency_hz) or physics_frequency_hz <= 0.0:
+        raise ValueError("simulation_frequency must be finite and positive")
+    policy_frequency_hz = float(
+        config.get("policy_frequency", physics_frequency_hz)
+    )
+    if not np.isfinite(policy_frequency_hz) or policy_frequency_hz <= 0.0:
+        raise ValueError("policy_frequency must be finite and positive")
+    cbf_frequency_hz = float(config.get("cbf_frequency", policy_frequency_hz))
+    if not np.isfinite(cbf_frequency_hz) or cbf_frequency_hz <= 0.0:
+        raise ValueError("cbf_frequency must be finite and positive")
+    dt_s = float(config.get("dt", 1.0 / physics_frequency_hz))
+    if not np.isfinite(dt_s) or dt_s <= 0.0:
+        raise ValueError("dt must be finite and positive")
+    effective_physics_frequency_hz = 1.0 / dt_s
+    if not np.isclose(
+        effective_physics_frequency_hz,
+        physics_frequency_hz,
+        rtol=0.0,
+        atol=1e-9,
+    ):
+        raise ValueError(
+            "dt and simulation_frequency disagree: "
+            f"dt={dt_s:g} implies {effective_physics_frequency_hz:g} Hz, "
+            f"not {physics_frequency_hz:g} Hz"
+        )
+
+    physics_frames_per_policy_action = _whole_physics_frame_ratio(
+        physics_frequency_hz,
+        policy_frequency_hz,
+        label="policy",
+    )
+    physics_frames_per_cbf_update = _whole_physics_frame_ratio(
+        physics_frequency_hz,
+        cbf_frequency_hz,
+        label="CBF",
+    )
+    substep_filtering = bool(config.get("cbf_substep_filtering", False))
+    expected_cbf_frequency_hz = (
+        physics_frequency_hz if substep_filtering else policy_frequency_hz
+    )
+    if not np.isclose(
+        cbf_frequency_hz,
+        expected_cbf_frequency_hz,
+        rtol=0.0,
+        atol=1e-9,
+    ):
+        expected_mode = "physics" if substep_filtering else "policy"
+        raise ValueError(
+            "CBF timing is ambiguous: with cbf_substep_filtering="
+            f"{substep_filtering}, cbf_frequency must equal the "
+            f"{expected_mode} frequency ({expected_cbf_frequency_hz:g} Hz), "
+            f"got {cbf_frequency_hz:g} Hz"
+        )
+
+    return {
+        "physics_frequency_hz": physics_frequency_hz,
+        "policy_frequency_hz": policy_frequency_hz,
+        "cbf_frequency_hz": cbf_frequency_hz,
+        "dt_s": dt_s,
+        "physics_frames_per_policy_action": physics_frames_per_policy_action,
+        "physics_frames_per_cbf_update": physics_frames_per_cbf_update,
+        "cbf_evaluations_per_policy_action": float(
+            physics_frames_per_policy_action / physics_frames_per_cbf_update
+        ),
+        "cbf_schedule": "physics_substep" if substep_filtering else "policy",
+    }
+
 
 def _deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     for key, value in updates.items():
@@ -225,9 +331,12 @@ class LaneFreeTrafficEnv(AbstractEnv):
             {
                 "road_length": 500.0,
                 "road_width": 10.2,
-                "dt": 0.25,
-                "simulation_frequency": 4,
-                "policy_frequency": 4,
+                # Canonical timing: 0.01 s physics frames at 100 Hz, with
+                # one held policy/CBF action every five physics frames.
+                "dt": 0.01,
+                "simulation_frequency": 100,
+                "policy_frequency": 20,
+                "cbf_frequency": 20,
                 "vehicles_count": 35,
                 "sensing_range": 80.0,
                 "episode_steps": 800,
@@ -235,10 +344,9 @@ class LaneFreeTrafficEnv(AbstractEnv):
                 "terminate_on_collision": True,
                 "gamma_nudge": 0.0,
                 "ego_controlled": True,
-                # A CBF wrapper can register a physical-action callback that
-                # is evaluated at every simulator frame.  It is deliberately
-                # opt-in so legacy policies retain their original action
-                # semantics and runtime cost.
+                # The requested CBF schedule is the policy rate.  The
+                # optional callback remains available for explicit physics-
+                # rate experiments, but those must set cbf_frequency to 100.
                 "cbf_substep_filtering": False,
                 # Keep the historical lateral boundary-force assist by default.
                 # Formulation experiments can disable only the ego-side assist
@@ -282,12 +390,17 @@ class LaneFreeTrafficEnv(AbstractEnv):
                     "spawn_ego_lateral_clearance": 0.75,
                     "spawn_time_headway": 0.75,
                     # Optional CBF-consistent spawn condition.  When enabled,
-                    # the reset state satisfies both the inflated-ellipse
-                    # safe set h >= 0 and psi_1 = h_dot + k1 h >= 0.
+                    # the reset state satisfies both the fixed relative-position
+                    # ellipse safe set h >= 0 and psi_1 = h_dot + 2.3 h >= 0.
                     "spawn_cbf_safe_set": False,
                     "spawn_cbf_eps_side": 0.10,
+                    # Legacy key name; interpreted in dimensionless h units
+                    # for the fixed relative-position ellipse.
                     "spawn_cbf_margin_m": 0.0,
-                    "spawn_cbf_k1": 3.68,
+                    # ``spawn_cbf_k1`` is retained as a compatibility alias;
+                    # the explicit psi1 gain is the authoritative setting.
+                    "spawn_cbf_psi1_gain": CBF_PSI1_GAIN,
+                    "spawn_cbf_k1": CBF_PSI1_GAIN,
                     "spawn_cbf_psi_margin": 0.0,
                     # The guard controls surrounding traffic only. It never
                     # overwrites the controlled ego action, so an unsafe ego
@@ -379,6 +492,24 @@ class LaneFreeTrafficEnv(AbstractEnv):
     def configure(self, config: dict | None) -> None:
         if config:
             _deep_update(self.config, config)
+            # Older experiment configurations called the first-level gain
+            # ``spawn_cbf_k1``.  Promote that key only when the new explicit
+            # name was not supplied, so a legacy critical-gain override still
+            # changes reset sampling instead of being hidden by the default.
+            traffic_safety_config = config.get("traffic_safety")
+            if (
+                isinstance(traffic_safety_config, dict)
+                and "spawn_cbf_psi1_gain" not in traffic_safety_config
+                and "spawn_cbf_k1" in traffic_safety_config
+                and isinstance(self.config.get("traffic_safety"), dict)
+            ):
+                self.config["traffic_safety"]["spawn_cbf_psi1_gain"] = float(
+                    self.config["traffic_safety"]["spawn_cbf_k1"]
+                )
+            # A caller that changes only policy_frequency should inherit a
+            # policy-rate CBF rather than retain a stale default frequency.
+            if "cbf_frequency" not in config and "policy_frequency" in config:
+                self.config["cbf_frequency"] = self.config["policy_frequency"]
         vehicle_dimensions = np.asarray(
             self.config.get("vehicle_dimensions", self.VEHICLE_DIMENSIONS),
             dtype=float,
@@ -391,6 +522,7 @@ class LaneFreeTrafficEnv(AbstractEnv):
         # when a caller passes a legacy ego_dimensions override.
         self.config["vehicle_dimensions"] = vehicle_dimensions.tolist()
         self.config["ego_dimensions"] = vehicle_dimensions[0].tolist()
+        self._frequency_plan = resolve_frequency_plan(self.config)
 
     def define_spaces(self) -> None:
         rows = 1 + int(self.config.get("neighbors_count", 5))
@@ -413,8 +545,9 @@ class LaneFreeTrafficEnv(AbstractEnv):
         the optional boundary-force contribution, plus its zero-based index
         within the policy step.  It may return either a two-element physical
         acceleration or ``(acceleration, diagnostics)``.  The latter is
-        folded into the regular step ``info`` dictionary, allowing a CBF
-        wrapper to prove its h/psi constraints at the 100 Hz dynamics rate.
+        folded into the regular step ``info`` dictionary.  This callback is
+        reserved for explicit physics-rate CBF experiments; the canonical
+        policy-rate CBF path does not install it.
 
         This is intentionally a narrow callback rather than a second action
         API: normal Gym users and legacy experiments are unchanged unless a
@@ -800,57 +933,36 @@ class LaneFreeTrafficEnv(AbstractEnv):
             return False
 
         # The rectangle guard prevents physical contact, but the CBF operates
-        # on an inflated ellipse.  When requested, reset states must satisfy
-        # both h >= 0 and psi_1 = h_dot + k1*h >= 0 before the first action.
+        # on the fixed relative-position ellipse.  When requested, reset states must satisfy
+        # both h >= 0 and psi_1 = h_dot + 2.3*h >= 0 before the first action.
         if bool(safety.get("spawn_cbf_safe_set", False)):
-            eps = max(float(safety.get("spawn_cbf_eps_side", 0.10)), 0.0)
+            # ``spawn_cbf_eps_side`` is retained in the configuration for
+            # compatibility; it does not change the fixed ellipse.
             dx = float(
                 (second.x - first.x + 0.5 * road_length) % road_length
                 - 0.5 * road_length
             )
             dy = float(second.y - first.y)
-            center_distance = float(np.hypot(dx, dy))
-            angle = float(np.arctan2(dy, dx)) if center_distance > 1e-9 else 0.0
-
-            def _inflated_radius_terms(
-                state: LaneFreeVehicleState,
-            ) -> tuple[float, float]:
-                a = float(state.length) / np.sqrt(2.0) + 2.0 * eps
-                b = float(state.width) / np.sqrt(2.0) + 2.0 * eps
-                denominator = np.sqrt(
-                    (b * np.cos(angle)) ** 2 + (a * np.sin(angle)) ** 2
-                )
-                radius = a * b / max(float(denominator), 1e-9)
-                d_radius = (
-                    -a
-                    * b
-                    * (a * a - b * b)
-                    * np.sin(angle)
-                    * np.cos(angle)
-                    / max(float(denominator) ** 3, 1e-9)
-                )
-                return float(radius), float(d_radius)
-
-            first_radius, first_d_radius = _inflated_radius_terms(first)
-            second_radius, second_d_radius = _inflated_radius_terms(second)
-            h_value = center_distance - first_radius - second_radius
+            a = float(CBF_RELATIVE_ELLIPSE_A)
+            b = float(CBF_RELATIVE_ELLIPSE_B)
+            h_value = (dx / a) ** 2 + (dy / b) ** 2 - 1.0
             if h_value < float(safety.get("spawn_cbf_margin_m", 0.0)):
                 return False
 
-            radial = np.asarray([dx, dy], dtype=float) / max(center_distance, 1e-9)
-            tangent = np.asarray([-radial[1], radial[0]], dtype=float)
-            gradient = radial + (
-                -(first_d_radius + second_d_radius)
-                / max(center_distance, 1e-9)
-            ) * tangent
+            gradient = np.asarray([2.0 * dx / (a**2), 2.0 * dy / (b**2)], dtype=float)
             relative_velocity = np.asarray(
                 [float(second.vx - first.vx), float(second.vy - first.vy)],
                 dtype=float,
             )
             h_dot = float(gradient @ relative_velocity)
-            k1 = float(safety.get("spawn_cbf_k1", 3.68))
+            psi1_gain = float(
+                safety.get(
+                    "spawn_cbf_psi1_gain",
+                    safety.get("spawn_cbf_k1", CBF_PSI1_GAIN),
+                )
+            )
             psi_margin = float(safety.get("spawn_cbf_psi_margin", 0.0))
-            return bool(h_dot + k1 * h_value >= psi_margin)
+            return bool(h_dot + psi1_gain * h_value >= psi_margin)
         return True
 
     def _sample_mtm_profile(self) -> str:
@@ -956,8 +1068,10 @@ class LaneFreeTrafficEnv(AbstractEnv):
         action_array = np.clip(action_array, -1.0, 1.0)
         self._last_action = action_array
 
-        frames = max(1, int(round(float(self.config["simulation_frequency"]) / float(self.config["policy_frequency"]))))
-        dt = float(self.config.get("dt", 1.0 / float(self.config["simulation_frequency"])))
+        frequency_plan = resolve_frequency_plan(self.config)
+        self._frequency_plan = frequency_plan
+        frames = int(frequency_plan["physics_frames_per_policy_action"])
+        dt = float(frequency_plan["dt_s"])
         substep_filter = getattr(self, "_ego_substep_action_filter", None)
         substep_enabled = bool(
             self.config.get("cbf_substep_filtering", False)
@@ -2210,8 +2324,28 @@ class LaneFreeTrafficEnv(AbstractEnv):
 
     def _info(self, obs: np.ndarray, action: np.ndarray | None = None) -> dict[str, Any]:
         elapsed_hours = max(self.time / 3600.0, 1e-9)
+        frequency_plan = getattr(self, "_frequency_plan", None)
+        if not isinstance(frequency_plan, dict):
+            frequency_plan = resolve_frequency_plan(self.config)
         info = {
             "traffic_model": str(self.config.get("traffic_model", "force")),
+            "physics_frequency_hz": float(
+                frequency_plan["physics_frequency_hz"]
+            ),
+            "policy_frequency_hz": float(
+                frequency_plan["policy_frequency_hz"]
+            ),
+            "cbf_frequency_hz": float(frequency_plan["cbf_frequency_hz"]),
+            "physics_frames_per_policy_action": int(
+                frequency_plan["physics_frames_per_policy_action"]
+            ),
+            "physics_frames_per_cbf_update": int(
+                frequency_plan["physics_frames_per_cbf_update"]
+            ),
+            "cbf_evaluations_per_policy_action": float(
+                frequency_plan["cbf_evaluations_per_policy_action"]
+            ),
+            "cbf_schedule": str(frequency_plan["cbf_schedule"]),
             "speed": float(self.vehicle.vx),
             "mean_speed": self.mean_speed,
             "collisions": int(self._last_collision_count),
@@ -2255,6 +2389,9 @@ class LaneFreeTrafficEnv(AbstractEnv):
                     substep_cbf.get("enabled", False)
                 ),
                 "cbf_substep_count": int(substep_cbf.get("steps", 0)),
+                "cbf_callback_evaluation_count": int(
+                    substep_cbf.get("steps", 0)
+                ),
                 "cbf_substep_mean_correction_norm": float(
                     substep_cbf.get("mean_correction_norm_physical", 0.0)
                 ),

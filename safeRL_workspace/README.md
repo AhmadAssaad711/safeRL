@@ -44,6 +44,8 @@ evaluation budget.
 ## Layout
 
     configs/                 Reusable MTM live configuration
+    pyproject.toml           New-research source-package metadata
+    src/saferl/              New research-only configuration and safety code
     ../artifacts/            Committed compact laneless result manifests
     docs/                    SafeRL experiment and API documentation
     laneless highway env/   lane-free-v0 implementation and demo
@@ -55,7 +57,7 @@ evaluation budget.
       reporting/            Plots, dashboards, and report builders
       rendering/            Policy and scenario visualization
       ops/                  Smoke checks and launch monitors
-    tests/                  Unit and protocol tests
+    tests/                  Unit, contract, and protocol tests
 
 Generated models, event logs, videos, plots, and new result folders are
 ignored by Git. Existing ../artifacts/ppo_* directories are compact committed
