@@ -21,7 +21,7 @@ and the test layout is described in [`tests/README.md`](../tests/README.md).
 
 ## Command convention
 
-Run commands from the `highway-rl-decision-making` directory. Python scripts
+Run commands from the `safeRL_workspace` directory. Python scripts
 are package modules, for example:
 
 ```powershell

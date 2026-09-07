@@ -1,7 +1,9 @@
 # safeRL tests
 
-Tests are divided by the level of contract they exercise. They are collected
-recursively by pytest from the `highway-rl-decision-making` directory.
+Tests are divided by the level of contract they exercise. Contract tests are
+the primary protection for scientific invariants; implementation coverage is
+secondary. Tests are collected
+recursively by pytest from the `safeRL_workspace` directory.
 
 ```powershell
 python -m pytest -q tests

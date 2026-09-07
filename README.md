@@ -31,11 +31,11 @@ strict collision-free 1 km completion for evaluation.
 
 | Path | Role |
 | --- | --- |
-| highway-rl-decision-making/notebooks/lanelessKaralakou.ipynb | Canonical notebook and experiment specification |
-| highway-rl-decision-making/laneless highway env/ | lane-free-v0 environment and renderer |
-| [highway-rl-decision-making/scripts/](safeRL_workspace/scripts/README.md) | Organized common, training, evaluation, reporting, rendering, and ops modules |
-| [highway-rl-decision-making/tests/](safeRL_workspace/tests/README.md) | Unit and protocol tests with shared pytest setup |
-| [highway-rl-decision-making/docs/](safeRL_workspace/docs/README.md) | Experiment, scenario, and script/function documentation |
+| safeRL_workspace/notebooks/lanelessKaralakou.ipynb | Canonical notebook and experiment specification |
+| safeRL_workspace/laneless highway env/ | lane-free-v0 environment and renderer |
+| [safeRL_workspace/scripts/](safeRL_workspace/scripts/README.md) | Organized common, training, evaluation, reporting, rendering, and ops modules |
+| [safeRL_workspace/tests/](safeRL_workspace/tests/README.md) | Unit and protocol tests with shared pytest setup |
+| [safeRL_workspace/docs/](safeRL_workspace/docs/README.md) | Experiment, scenario, and script/function documentation |
 | artifacts/ppo_* directories | Committed safeRL result manifests and compact summaries |
 
 Lane-indexed highway notebooks, DQN implementations, unrelated planning
@@ -48,11 +48,11 @@ contains the prior state if an old reference is ever needed.
     py -3.12 -m venv .venv
     .\.venv\Scripts\Activate.ps1
     python -m pip install --upgrade pip
-    python -m pip install -r highway-rl-decision-making\requirements.txt
+    python -m pip install -r safeRL_workspace\requirements.txt
 
 For environment-only smoke testing:
 
-    Set-Location highway-rl-decision-making
+    Set-Location safeRL_workspace
     python -m scripts.ops.mtm_laneless_smoke --help
 
 Do not run the full 1M-transition ladder accidentally. The notebook's shared

@@ -34,6 +34,8 @@ pre_reset_backup_*/
 # Generated experiment outputs, models, and datasets
 artifacts/*
 !artifacts/README.md
+safeRL_workspace/artifacts/*
+!safeRL_workspace/artifacts/README.md
 results/
 runs/
 wandb/
