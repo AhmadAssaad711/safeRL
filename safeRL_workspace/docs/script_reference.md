@@ -65,8 +65,8 @@ not silently replace them with lane-indexed highway-v0 assumptions.
 
 - Environment: lane-free-v0 with MTM traffic, a 380 by 10.2 m road, 55
   vehicles, five visible neighbors, and a 90 m sensing range.
-- Timing: 100 Hz physics, 10 Hz policy decisions, and a 0.01 s simulation
-  step.
+- Timing: 100 Hz physics (`dt=0.01 s`), 20 Hz policy decisions, and a 20 Hz
+  policy-rate CBF update. Each policy action spans five physics frames.
 - Base observation: five values per visible vehicle, with target-y and previous
   executed action wrappers producing the canonical PPO 32-dimensional input.
 - Physical action: longitudinal acceleration and lateral target or control
@@ -385,6 +385,18 @@ This is the main multi-variant PPO experiment runner.
   compatible checkpoint; _is_retryable_pending_run identifies incomplete runs.
 - _base_environment, make_ppo_cbf_env, _make_ppo_worker_env, and
   make_training_vec_env create the training stack.
+- `ppo_hocbf_reward_raw` is the raw box-execution ablation: it keeps the
+  canonical policy input and common task reward, then subtracts a direct
+  penalty from the minimum second-order HOCBF slack across active neighbor
+  and road-boundary rows. When `--hocbf-psi-scale` is omitted,
+  `calibrate_hocbf_reward_scale` first trains or reuses one fixed deterministic
+  nominal PPO policy, measures its unshielded raw rollout, and freezes that
+  residual normalization before the HOCBF treatment starts. Include
+  `ppo_nominal` in `--variants`; evaluation-only runs must provide an explicit
+  scale. Use an explicit environment override when the experiment requires a
+  100 Hz physics rate and 20 Hz policy/CBF rate. The environment records all
+  three frequencies and rejects an ambiguous
+  `cbf_substep_filtering`/`cbf_frequency` combination.
 - build_model and load_model select or restore the PPO implementation.
 - train_variant runs one named formulation and writes progress.
 - make_evaluation_env, evaluate_scenario, evaluate_completed_episode, and

@@ -100,8 +100,12 @@ def _write_completed_checkpoint(
 
 
 def test_progression_contains_the_required_causal_controls():
+    assert set(progression.VARIANT_SPECS).issubset(
+        progression.TENSORBOARD_VARIANT_IDS
+    )
     assert tuple(progression.VARIANT_SPECS) == (
         "ppo_nominal",
+        "ppo_hocbf_reward_raw",
         "ppo_cbf_shield_only",
         "ppo_cbf_reward",
         "ppo_cbf_nd_reward_actor",
@@ -112,6 +116,7 @@ def test_progression_contains_the_required_causal_controls():
         "ppo_cbf_integrated_actor_only",
     )
     nominal = progression.VARIANT_SPECS["ppo_nominal"]
+    hocbf_reward_raw = progression.VARIANT_SPECS["ppo_hocbf_reward_raw"]
     shield_only = progression.VARIANT_SPECS["ppo_cbf_shield_only"]
     reward = progression.VARIANT_SPECS["ppo_cbf_reward"]
     reward_actor = progression.VARIANT_SPECS["ppo_cbf_nd_reward_actor"]
@@ -128,6 +133,9 @@ def test_progression_contains_the_required_causal_controls():
     actor_only = progression.VARIANT_SPECS["ppo_cbf_integrated_actor_only"]
     assert nominal["execution_mode"] == "box"
     assert not nominal["reward_penalty"]
+    assert hocbf_reward_raw["execution_mode"] == "box"
+    assert hocbf_reward_raw["hocbf_reward"]
+    assert not hocbf_reward_raw["reward_penalty"]
     assert shield_only["execution_mode"] == "cbf"
     assert not shield_only["reward_penalty"]
     assert reward["execution_mode"] == "cbf"

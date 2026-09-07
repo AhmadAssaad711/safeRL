@@ -83,8 +83,8 @@ from scripts.training.run_nominal_ppo_parameter_pilot import PPOActionClipCallba
 from scripts.training.train_safety_potential_variants import MTM_CONGESTED_UNCERTAIN_UPDATES
 
 
-PROGRESSION_SCHEMA_VERSION = 8
-PPO_TRAINING_IMPLEMENTATION_VERSION = 12
+PROGRESSION_SCHEMA_VERSION = 10
+PPO_TRAINING_IMPLEMENTATION_VERSION = 14
 TRAINING_SIGNATURE_FILE = "training_signature.json"
 TRAINING_PENDING_SIGNATURE_FILE = "training_signature.pending.json"
 TRAINING_COMPLETION_FILE = "training_complete.json"
@@ -109,6 +109,18 @@ VARIANT_SPECS: dict[str, dict[str, Any]] = {
         "level": 1,
         "execution_mode": "box",
         "reward_penalty": False,
+        "hocbf_reward": False,
+        "projected_mean": False,
+        "differentiable_actor_loss": False,
+        "detached_actor_loss": False,
+        "safety_critic": False,
+    },
+    "ppo_hocbf_reward_raw": {
+        "label": "PPO raw execution + second-order HOCBF reward",
+        "level": 1,
+        "execution_mode": "box",
+        "reward_penalty": False,
+        "hocbf_reward": True,
         "projected_mean": False,
         "differentiable_actor_loss": False,
         "detached_actor_loss": False,
@@ -266,6 +278,7 @@ FILTERED_FACTORIAL_VARIANTS = {
 WINDOWS_TENSORBOARD_PATH_LIMIT = 248
 TENSORBOARD_VARIANT_IDS = {
     "ppo_nominal": "nom",
+    "ppo_hocbf_reward_raw": "hcr",
     "ppo_cbf_shield_only": "shld",
     "ppo_cbf_reward": "rwd",
     "ppo_cbf_nd_reward_actor": "ndra",
@@ -296,6 +309,12 @@ def _finite_min(values: Iterable[float], default: float = np.nan) -> float:
     array = np.asarray(list(values), dtype=float).reshape(-1)
     array = array[np.isfinite(array)]
     return float(np.min(array)) if array.size else float(default)
+
+
+def _finite_max(values: Iterable[float], default: float = np.nan) -> float:
+    array = np.asarray(list(values), dtype=float).reshape(-1)
+    array = array[np.isfinite(array)]
+    return float(np.max(array)) if array.size else float(default)
 
 
 def _deep_set_defaults(base: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
@@ -649,6 +668,21 @@ def _effective_training_settings(
             if str(variant) == "ppo_nominal"
             else 0.0
         ),
+        "hocbf_reward_lambda": (
+            float(getattr(args, "hocbf_reward_lambda", 0.0))
+            if bool(spec.get("hocbf_reward", False))
+            else 0.0
+        ),
+        "hocbf_reward_scale": (
+            float(getattr(args, "hocbf_psi_scale", 1.0))
+            if bool(spec.get("hocbf_reward", False))
+            else 0.0
+        ),
+        "hocbf_reward_margin": (
+            float(getattr(args, "hocbf_reward_margin", 0.0))
+            if bool(spec.get("hocbf_reward", False))
+            else 0.0
+        ),
     }
 
 
@@ -661,6 +695,8 @@ def _cbf_training_snapshot(namespace: dict[str, Any]) -> dict[str, Any]:
         "CBF_EPS_SIDE",
         "CBF_K0",
         "CBF_K1",
+        "CBF_RELATIVE_ELLIPSE_A",
+        "CBF_RELATIVE_ELLIPSE_B",
         "CBF_NEIGHBOR_RANGE",
         "CBF_MAX_NEIGHBOR_CONSTRAINTS",
         "CBF_QP_FEASIBILITY_TOL",
@@ -1176,6 +1212,9 @@ def make_ppo_cbf_env(
     lambda_intervention: float,
     correction_epsilon: float,
     action_rate_penalty_lambda: float = 0.0,
+    hocbf_reward_lambda: float = 0.0,
+    hocbf_reward_scale: float = 1.0,
+    hocbf_reward_margin: float = 0.0,
     monitor_path: Path | None = None,
 ) -> gym.Env:
     """Build the shared physical-action/context environment for every level."""
@@ -1199,6 +1238,9 @@ def make_ppo_cbf_env(
         lambda_intervention=float(lambda_intervention),
         correction_epsilon=float(correction_epsilon),
         action_rate_penalty_lambda=float(action_rate_penalty_lambda),
+        hocbf_reward_lambda=float(hocbf_reward_lambda),
+        hocbf_reward_scale=float(hocbf_reward_scale),
+        hocbf_reward_margin=float(hocbf_reward_margin),
     )
     if "KPIInfoWrapper" in namespace:
         env = namespace["KPIInfoWrapper"](
@@ -1215,6 +1257,130 @@ def make_ppo_cbf_env(
     return env
 
 
+def calibrate_hocbf_reward_scale(
+    namespace: dict[str, Any],
+    *,
+    nominal_model_path: Path,
+    model_device: str,
+    nominal_training_seed: int,
+    env_config: dict[str, Any],
+    reward_config: dict[str, float],
+    seed: int,
+    steps: int,
+    output_path: Path | None = None,
+) -> float:
+    """Calibrate a fixed psi2 normalization from a nominal PPO rollout.
+
+    The nominal policy is loaded once and rolled out deterministically with no
+    CBF projection.  The resulting scale is completed before the HOCBF
+    treatment starts, so it is fixed and cannot adapt to that learned policy.
+    It is a descriptive normalization, not a safety claim.
+    """
+
+    nominal_model_path = Path(nominal_model_path)
+    if not nominal_model_path.is_file():
+        raise FileNotFoundError(
+            "Nominal PPO calibration model does not exist: "
+            f"{nominal_model_path}"
+        )
+    nominal_model = load_model("ppo_nominal", nominal_model_path, model_device)
+
+    env = make_ppo_cbf_env(
+        namespace,
+        env_config=env_config,
+        reward_config=reward_config,
+        project_inputs=False,
+        lambda_delta=0.0,
+        lambda_intervention=0.0,
+        correction_epsilon=0.03,
+        hocbf_reward_lambda=0.0,
+        hocbf_reward_scale=1.0,
+        hocbf_reward_margin=0.0,
+        monitor_path=None,
+    )
+    residuals: list[float] = []
+    violations: list[float] = []
+    raw_actions: list[np.ndarray] = []
+    observed_steps = 0
+    try:
+        observation, _reset_info = env.reset(seed=int(seed))
+        for _ in range(int(steps)):
+            action, _state = nominal_model.predict(
+                observation, deterministic=True
+            )
+            action = np.asarray(action, dtype=np.float32).reshape(-1)
+            if action.size < 2:
+                raise RuntimeError(
+                    "Nominal PPO calibration policy returned fewer than two "
+                    f"action values: shape={action.shape}"
+                )
+            action = action[:2]
+            observation, _reward, terminated, truncated, info = env.step(action)
+            info = dict(info)
+            observed_steps += 1
+            raw_action = np.asarray(
+                info.get("raw_action_phys", action), dtype=float
+            ).reshape(-1)
+            if raw_action.size >= 2:
+                raw_actions.append(raw_action[:2])
+            residual = float(info.get("cbf_hocbf_raw_max_abs_residual", np.nan))
+            violation = float(info.get("cbf_hocbf_raw_max_violation", np.nan))
+            if np.isfinite(residual):
+                residuals.append(residual)
+            if np.isfinite(violation):
+                violations.append(violation)
+            if terminated or truncated:
+                break
+    finally:
+        env.close()
+
+    if not residuals:
+        raise RuntimeError(
+            "HOCBF scale calibration produced no finite second-order residuals"
+        )
+    values = np.asarray(residuals, dtype=float)
+    scale = float(max(np.percentile(values, 95.0), 1e-6))
+    raw_action_values = (
+        np.asarray(raw_actions, dtype=float) if raw_actions else np.empty((0, 2))
+    )
+    payload = {
+        "schema_version": 2,
+        "calibration_policy": "ppo_nominal",
+        "action_source": "nominal_policy_deterministic",
+        "nominal_model_path": str(nominal_model_path.resolve()),
+        "nominal_model_sha256": protocol.file_sha256(nominal_model_path),
+        "nominal_training_seed": int(nominal_training_seed),
+        "calibration_rollout_seed": int(seed),
+        "requested_policy_steps": int(steps),
+        "observed_policy_steps": int(observed_steps),
+        "physics_hz": float(env_config.get("simulation_frequency", np.nan)),
+        "policy_hz": float(env_config.get("policy_frequency", np.nan)),
+        "cbf_reward_hz": float(env_config.get("policy_frequency", np.nan)),
+        "raw_action_abs_p95": (
+            float(np.percentile(np.abs(raw_action_values), 95.0))
+            if raw_action_values.size
+            else None
+        ),
+        "residual_abs_p50": float(np.percentile(values, 50.0)),
+        "residual_abs_p95": float(np.percentile(values, 95.0)),
+        "residual_abs_p99": float(np.percentile(values, 99.0)),
+        "residual_abs_max": float(np.max(values)),
+        "violation_p95": (
+            float(np.percentile(np.asarray(violations, dtype=float), 95.0))
+            if violations
+            else 0.0
+        ),
+        "selected_psi_scale": scale,
+    }
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    print("[ppo-progression] calibrated HOCBF reward scale", payload, flush=True)
+    return scale
+
+
 def _make_ppo_worker_env(
     *,
     project_root: str,
@@ -1225,6 +1391,9 @@ def _make_ppo_worker_env(
     lambda_intervention: float,
     correction_epsilon: float,
     action_rate_penalty_lambda: float,
+    hocbf_reward_lambda: float,
+    hocbf_reward_scale: float,
+    hocbf_reward_margin: float,
     monitor_path: str,
 ) -> gym.Env:
     """Create a PPO environment inside a spawned rollout worker.
@@ -1253,6 +1422,9 @@ def _make_ppo_worker_env(
         lambda_intervention=float(lambda_intervention),
         correction_epsilon=float(correction_epsilon),
         action_rate_penalty_lambda=float(action_rate_penalty_lambda),
+        hocbf_reward_lambda=float(hocbf_reward_lambda),
+        hocbf_reward_scale=float(hocbf_reward_scale),
+        hocbf_reward_margin=float(hocbf_reward_margin),
         monitor_path=Path(monitor_path),
     )
 
@@ -1292,6 +1464,21 @@ def make_training_vec_env(
     reward_on = bool(spec["reward_penalty"])
     lambda_delta = float(args.lambda_delta) if reward_on else 0.0
     lambda_intervention = float(args.lambda_intervention) if reward_on else 0.0
+    hocbf_reward_lambda = (
+        float(getattr(args, "hocbf_reward_lambda", 0.0))
+        if bool(spec.get("hocbf_reward", False))
+        else 0.0
+    )
+    hocbf_reward_scale = (
+        float(getattr(args, "hocbf_psi_scale", 1.0))
+        if bool(spec.get("hocbf_reward", False))
+        else 1.0
+    )
+    hocbf_reward_margin = (
+        float(getattr(args, "hocbf_reward_margin", 0.0))
+        if bool(spec.get("hocbf_reward", False))
+        else 0.0
+    )
     action_rate_penalty_lambda = (
         float(args.action_rate_penalty)
         if str(variant) == "ppo_nominal"
@@ -1309,6 +1496,9 @@ def make_training_vec_env(
                 lambda_intervention=lambda_intervention,
                 correction_epsilon=float(args.correction_epsilon),
                 action_rate_penalty_lambda=action_rate_penalty_lambda,
+                hocbf_reward_lambda=hocbf_reward_lambda,
+                hocbf_reward_scale=hocbf_reward_scale,
+                hocbf_reward_margin=hocbf_reward_margin,
                 monitor_path=monitor_path,
             )
 
@@ -1324,6 +1514,9 @@ def make_training_vec_env(
             "lambda_intervention": lambda_intervention,
             "correction_epsilon": float(args.correction_epsilon),
             "action_rate_penalty_lambda": action_rate_penalty_lambda,
+            "hocbf_reward_lambda": hocbf_reward_lambda,
+            "hocbf_reward_scale": hocbf_reward_scale,
+            "hocbf_reward_margin": hocbf_reward_margin,
         }
         env_fns = [
             partial(
@@ -1877,6 +2070,9 @@ def evaluate_scenario(
         speed_errors: list[float] = []
         lateral_errors: list[float] = []
         h_values: list[float] = []
+        hocbf_margins: list[float] = []
+        hocbf_violations: list[float] = []
+        hocbf_reward_penalties: list[float] = []
         jerk_norms: list[float] = []
         interventions: list[float] = []
         corrections: list[float] = []
@@ -1914,6 +2110,15 @@ def evaluate_scenario(
 
             observation, reward, terminated, truncated, info = env.step(action)
             info = dict(info)
+            hocbf_margins.append(
+                float(info.get("cbf_hocbf_raw_min_margin", np.nan))
+            )
+            hocbf_violations.append(
+                float(info.get("cbf_hocbf_raw_max_violation", np.nan))
+            )
+            hocbf_reward_penalties.append(
+                float(info.get("cbf_hocbf_reward_penalty", 0.0))
+            )
             rewards.append(float(reward))
             segment_return += float(reward)
             segment_steps += 1
@@ -2001,6 +2206,14 @@ def evaluate_scenario(
             "episode_length_steps": _finite_mean(episode_lengths),
             "ego_collisions_per_km": float(collisions_per_km),
             "h_min": _finite_min(h_values),
+            "hocbf_raw_min_margin": _finite_min(hocbf_margins),
+            "hocbf_raw_max_violation": _finite_max(hocbf_violations, default=0.0),
+            "hocbf_raw_violation_rate": _finite_mean(
+                [float(value > 0.0) for value in hocbf_violations], default=0.0
+            ),
+            "hocbf_reward_penalty_mean": _finite_mean(
+                hocbf_reward_penalties, default=0.0
+            ),
             "qp_failure_rate": _finite_mean(qp_failures, default=0.0),
             "mean_abs_speed_deviation": _finite_mean(speed_errors, default=0.0),
             "mean_lat_y_error_m": _finite_mean(lateral_errors),
@@ -2053,6 +2266,9 @@ def evaluate_completed_episode(
         speed_errors: list[float] = []
         lateral_errors: list[float] = []
         h_values: list[float] = []
+        hocbf_margins: list[float] = []
+        hocbf_violations: list[float] = []
+        hocbf_reward_penalties: list[float] = []
         jerk_norms: list[float] = []
         interventions: list[float] = []
         corrections: list[float] = []
@@ -2094,6 +2310,15 @@ def evaluate_completed_episode(
 
             observation, reward, terminated, truncated, info = env.step(action)
             info = dict(info)
+            hocbf_margins.append(
+                float(info.get("cbf_hocbf_raw_min_margin", np.nan))
+            )
+            hocbf_violations.append(
+                float(info.get("cbf_hocbf_raw_max_violation", np.nan))
+            )
+            hocbf_reward_penalties.append(
+                float(info.get("cbf_hocbf_reward_penalty", 0.0))
+            )
             rewards.append(float(reward))
             # The event-level QP attribution is populated after collision
             # count normalization below, on this same policy transition.
@@ -2294,6 +2519,14 @@ def evaluate_completed_episode(
             "episode_length_steps": float(len(rewards)),
             "ego_collisions_per_km": float(collisions_per_km),
             "h_min": _finite_min(h_values),
+            "hocbf_raw_min_margin": _finite_min(hocbf_margins),
+            "hocbf_raw_max_violation": _finite_max(hocbf_violations, default=0.0),
+            "hocbf_raw_violation_rate": _finite_mean(
+                [float(value > 0.0) for value in hocbf_violations], default=0.0
+            ),
+            "hocbf_reward_penalty_mean": _finite_mean(
+                hocbf_reward_penalties, default=0.0
+            ),
             "qp_failure_rate": _finite_mean(qp_failures, default=0.0),
             "mean_abs_speed_deviation": _finite_mean(speed_errors, default=0.0),
             "mean_lat_y_error_m": _finite_mean(lateral_errors),
@@ -3615,6 +3848,58 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda-delta", type=float, default=0.05)
     parser.add_argument("--lambda-intervention", type=float, default=0.10)
     parser.add_argument(
+        "--hocbf-reward-lambda",
+        type=float,
+        default=1.0,
+        help=(
+            "Coefficient for the direct second-order HOCBF residual reward; "
+            "active only for ppo_hocbf_reward_raw."
+        ),
+    )
+    parser.add_argument(
+        "--hocbf-psi-scale",
+        type=float,
+        default=None,
+        help=(
+            "Positive normalization scale for the second-order HOCBF residual. "
+            "When omitted, calibrate it once from a fixed deterministic nominal "
+            "PPO rollout."
+        ),
+    )
+    parser.add_argument(
+        "--hocbf-reward-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional positive HOCBF residual margin in physical psi2 units; "
+            "zero enforces only psi2 >= 0."
+        ),
+    )
+    parser.add_argument(
+        "--hocbf-calibration-seed",
+        type=int,
+        default=307,
+        help="Fixed reset seed used when calibrating the HOCBF residual scale.",
+    )
+    parser.add_argument(
+        "--hocbf-calibration-steps",
+        type=int,
+        default=200,
+        help=(
+            "Policy steps in the fixed nominal-policy HOCBF scale calibration "
+            "rollout."
+        ),
+    )
+    parser.add_argument(
+        "--hocbf-calibration-nominal-seed",
+        type=int,
+        default=None,
+        help=(
+            "Training seed for the fixed nominal PPO calibration policy; "
+            "defaults to the first --seeds entry."
+        ),
+    )
+    parser.add_argument(
         "--lambda-mean",
         type=float,
         default=0.10,
@@ -3832,6 +4117,21 @@ def main() -> int:
         args.action_rate_penalty
     ) < 0.0:
         raise ValueError("--action-rate-penalty must be finite and non-negative")
+    if not np.isfinite(float(args.hocbf_reward_lambda)) or float(
+        args.hocbf_reward_lambda
+    ) < 0.0:
+        raise ValueError("--hocbf-reward-lambda must be finite and non-negative")
+    if args.hocbf_psi_scale is not None and (
+        not np.isfinite(float(args.hocbf_psi_scale))
+        or float(args.hocbf_psi_scale) <= 0.0
+    ):
+        raise ValueError("--hocbf-psi-scale must be finite and positive")
+    if not np.isfinite(float(args.hocbf_reward_margin)) or float(
+        args.hocbf_reward_margin
+    ) < 0.0:
+        raise ValueError("--hocbf-reward-margin must be finite and non-negative")
+    if int(args.hocbf_calibration_steps) <= 0:
+        raise ValueError("--hocbf-calibration-steps must be positive")
     for name in (
         "lambda_mean",
         "lambda_detached_actor",
@@ -3973,6 +4273,96 @@ def main() -> int:
         if not np.isfinite(float(args.risk_potential_shaping_gamma)) or not 0.0 <= float(args.risk_potential_shaping_gamma) <= 1.0:
             raise ValueError("--risk-potential-shaping-gamma must lie in [0, 1]")
         reward_config["risk_potential_shaping_gamma"] = float(args.risk_potential_shaping_gamma)
+    hocbf_reward_requested = "ppo_hocbf_reward_raw" in args.variants
+    hocbf_scale_calibration_path: Path | None = None
+    calibration_nominal_training_seed: int | None = None
+    precalibrated_nominal_result: VariantTrainingResult | None = None
+    if hocbf_reward_requested:
+        physics_hz = float(env_config.get("simulation_frequency", np.nan))
+        policy_hz = float(env_config.get("policy_frequency", np.nan))
+        dt = float(env_config.get("dt", np.nan))
+        if not np.isclose(physics_hz, 100.0):
+            raise ValueError(
+                "ppo_hocbf_reward_raw requires simulation_frequency=100; "
+                "pass the explicit experiment env override"
+            )
+        if not np.isclose(policy_hz, 20.0):
+            raise ValueError(
+                "ppo_hocbf_reward_raw requires policy_frequency=20; "
+                "pass the explicit experiment env override"
+            )
+        if not np.isclose(dt, 0.01):
+            raise ValueError(
+                "ppo_hocbf_reward_raw requires dt=0.01 for 100 Hz physics"
+            )
+        if bool(env_config.get("cbf_substep_filtering", True)):
+            raise ValueError(
+                "ppo_hocbf_reward_raw requires cbf_substep_filtering=false "
+                "so the CBF rate is the requested 20 Hz policy rate"
+            )
+        if args.hocbf_psi_scale is None:
+            if args.skip_training:
+                raise ValueError(
+                    "Omitting --hocbf-psi-scale requires training a fixed "
+                    "nominal PPO calibration policy; --skip-training cannot "
+                    "calibrate it. Pass an explicit scale for evaluation-only "
+                    "reuse."
+                )
+            if "ppo_nominal" not in args.variants:
+                raise ValueError(
+                    "Omitting --hocbf-psi-scale requires ppo_nominal in "
+                    "--variants so the fixed calibration policy is explicit."
+                )
+            calibration_nominal_training_seed = int(
+                args.hocbf_calibration_nominal_seed
+                if args.hocbf_calibration_nominal_seed is not None
+                else args.seeds[0]
+            )
+            if calibration_nominal_training_seed not in [
+                int(seed) for seed in args.seeds
+            ]:
+                raise ValueError(
+                    "--hocbf-calibration-nominal-seed must be present in "
+                    "--seeds"
+                )
+            print(
+                "[ppo-progression] training/reusing fixed nominal PPO "
+                "calibration policy",
+                {
+                    "training_seed": calibration_nominal_training_seed,
+                    "timesteps": int(args.timesteps),
+                },
+                flush=True,
+            )
+            # The nominal variant does not use this setting, but assigning a
+            # finite value keeps its signature and construction path complete
+            # before the treatment scale is calibrated.
+            args.hocbf_psi_scale = 1.0
+            precalibrated_nominal_result = train_variant(
+                namespace,
+                variant="ppo_nominal",
+                training_seed=calibration_nominal_training_seed,
+                env_config=env_config,
+                reward_config=reward_config,
+                args=args,
+                output_dir=output_dir,
+            )
+            hocbf_scale_calibration_path = (
+                output_dir / "hocbf_scale_calibration.json"
+            )
+            args.hocbf_psi_scale = calibrate_hocbf_reward_scale(
+                namespace,
+                nominal_model_path=precalibrated_nominal_result.model_path,
+                model_device=str(args.device),
+                nominal_training_seed=calibration_nominal_training_seed,
+                env_config=env_config,
+                reward_config=reward_config,
+                seed=int(args.hocbf_calibration_seed),
+                steps=int(args.hocbf_calibration_steps),
+                output_path=hocbf_scale_calibration_path,
+            )
+    elif args.hocbf_psi_scale is None:
+        args.hocbf_psi_scale = 1.0
     config = resolved_ppo_config(args)
     print(
         "[ppo-progression] starting",
@@ -4052,6 +4442,12 @@ def main() -> int:
                 reward_config.get("lateral_reward_sigma", 1.0)
             ),
             "action_rate_penalty": float(args.action_rate_penalty),
+            "hocbf_reward_lambda": float(args.hocbf_reward_lambda),
+            "hocbf_psi_scale": float(args.hocbf_psi_scale),
+            "hocbf_reward_margin": float(args.hocbf_reward_margin),
+            "hocbf_reward_frequency_hz": float(
+                env_config.get("policy_frequency", np.nan)
+            ),
             "ppo_config": config,
             "collection_topology": training_topology(args),
             "traffic_model": active_traffic_model(env_config),
@@ -4119,6 +4515,17 @@ def main() -> int:
                     model_path=path,
                     trained=False,
                     tensorboard_log_dir=tensorboard_log_dir,
+                )
+            elif (
+                precalibrated_nominal_result is not None
+                and variant == "ppo_nominal"
+                and training_seed == calibration_nominal_training_seed
+            ):
+                result = precalibrated_nominal_result
+                print(
+                    "[ppo-progression] reuse nominal calibration result "
+                    f"for seed={training_seed}: {result.model_path}",
+                    flush=True,
                 )
             else:
                 result = train_variant(
@@ -4221,6 +4628,26 @@ def main() -> int:
         "safety_critic_gamma": float(args.safety_critic_gamma),
         "safety_critic_cost_clip": float(args.safety_critic_cost_clip),
         "action_rate_penalty": float(args.action_rate_penalty),
+        "hocbf_reward_lambda": float(args.hocbf_reward_lambda),
+        "hocbf_psi_scale": float(args.hocbf_psi_scale),
+        "hocbf_reward_margin": float(args.hocbf_reward_margin),
+        "hocbf_reward_frequency_hz": float(
+            env_config.get("policy_frequency", np.nan)
+        ),
+        "hocbf_scale_calibration": (
+            str(hocbf_scale_calibration_path)
+            if hocbf_scale_calibration_path is not None
+            else None
+        ),
+        "hocbf_calibration_policy": (
+            "ppo_nominal" if hocbf_scale_calibration_path is not None else None
+        ),
+        "hocbf_calibration_nominal_training_seed": calibration_nominal_training_seed,
+        "hocbf_calibration_nominal_model": (
+            str(precalibrated_nominal_result.model_path)
+            if precalibrated_nominal_result is not None
+            else None
+        ),
         "correction_epsilon": float(args.correction_epsilon),
         "collision_penalty": float(reward_config["collision_penalty"]),
         "reward_mode": str(reward_config.get("reward_mode", "reciprocal")),

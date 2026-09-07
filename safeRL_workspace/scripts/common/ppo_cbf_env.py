@@ -11,7 +11,6 @@ minibatch recomputation.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 from typing import Any, Optional
 
@@ -71,6 +70,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         lambda_intervention: float = 0.0,
         correction_epsilon: float = 0.03,
         action_rate_penalty_lambda: float = 0.0,
+        hocbf_reward_lambda: float = 0.0,
+        hocbf_reward_scale: float = 1.0,
+        hocbf_reward_margin: float = 0.0,
     ) -> None:
         super().__init__(env)
         self.namespace = namespace
@@ -111,8 +113,17 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         self.lambda_intervention = float(lambda_intervention)
         self.correction_epsilon = float(correction_epsilon)
         self.action_rate_penalty_lambda = float(action_rate_penalty_lambda)
+        self.hocbf_reward_lambda = float(hocbf_reward_lambda)
+        self.hocbf_reward_scale = float(hocbf_reward_scale)
+        self.hocbf_reward_margin = float(hocbf_reward_margin)
         if not np.isfinite(self.action_rate_penalty_lambda) or self.action_rate_penalty_lambda < 0.0:
             raise ValueError("action_rate_penalty_lambda must be finite and non-negative")
+        if not np.isfinite(self.hocbf_reward_lambda) or self.hocbf_reward_lambda < 0.0:
+            raise ValueError("hocbf_reward_lambda must be finite and non-negative")
+        if not np.isfinite(self.hocbf_reward_scale) or self.hocbf_reward_scale <= 0.0:
+            raise ValueError("hocbf_reward_scale must be finite and positive")
+        if not np.isfinite(self.hocbf_reward_margin) or self.hocbf_reward_margin < 0.0:
+            raise ValueError("hocbf_reward_margin must be finite and non-negative")
 
         self.action_space = gym.spaces.Box(
             low=np.asarray([self.ax_bounds[0], self.ay_bounds[0]], dtype=np.float32),
@@ -180,7 +191,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         self, observation: np.ndarray, system: Optional[dict[str, Any]] = None
     ) -> np.ndarray:
         system = self._constraint_system() if system is None else system
-        self._last_system = copy.deepcopy(system)
+        self._last_system = system
         return append_cbf_context(
             observation,
             system["rows"],
@@ -189,11 +200,16 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         )
 
     def current_constraint_system(self) -> dict[str, Any]:
-        """Return a copy of the exact context represented in the last observation."""
+        """Return the exact context represented in the last observation.
+
+        ``system`` dicts are freshly built by ``_constraint_system`` for each
+        observation and are never mutated afterward, so callers receive the
+        same object rather than a deep copy of it.
+        """
 
         if self._last_system is None:
             self._last_system = self._constraint_system()
-        return copy.deepcopy(self._last_system)
+        return self._last_system
 
     def project_current_action(self, raw_action: Any) -> tuple[np.ndarray, dict[str, Any]]:
         system = self.current_constraint_system()
@@ -281,15 +297,20 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 "hocbf_margin": float("inf"),
                 "max_hocbf_violation_safe": 0.0,
                 "hocbf_condition_satisfied": True,
+                "hocbf_mean_violation": 0.0,
+                "hocbf_max_abs_residual": 0.0,
             }
         rows = rows.reshape(-1, 2)
         slack = bounds - rows @ action
         min_margin = float(np.min(slack))
+        violations = np.maximum(-slack, 0.0)
         max_violation = float(np.max(-slack))
         return {
             "hocbf_margin": min_margin,
             "max_hocbf_violation_safe": max(0.0, max_violation),
             "hocbf_condition_satisfied": bool(max_violation <= 1e-5),
+            "hocbf_mean_violation": float(np.mean(violations)),
+            "hocbf_max_abs_residual": float(np.max(np.abs(slack))),
         }
 
     def _project_substep_action(
@@ -298,9 +319,10 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         """Project a fresh physical action against the current physics state."""
 
         # Do not use ``current_constraint_system`` here: it intentionally
-        # caches the policy-rate observation context.  At 100 Hz the traffic
-        # state changes during the ten simulator frames, so each substep needs
-        # a new HOCBF polytope.
+        # caches the policy-rate observation context.  This method is used
+        # only by the explicit physics-rate callback mode.  The requested
+        # policy-rate experiment leaves that callback disabled, so its hard
+        # CBF projection is evaluated once per policy action instead.
         system = self._constraint_system()
         result = project_polytope_2d_numpy(
             raw_action,
@@ -571,6 +593,25 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             record = self._box_record(action, system)
             safe_action = record["safe_action"]
 
+        # The direct HOCBF reward is intentionally evaluated once at the
+        # policy/CBF rate.  It uses the raw physical policy action after only
+        # actuator-box clipping; no CBF projection is included in this term.
+        # Thus a treatment run can be compared with raw nominal PPO without
+        # silently changing the action that reaches the simulator.
+        hocbf_reward_action = np.clip(
+            np.asarray(record["raw_action"], dtype=np.float32).reshape(-1)[:2],
+            self.physical_low,
+            self.physical_high,
+        )
+        raw_hocbf = self._hocbf_diagnostics(system, hocbf_reward_action)
+        hocbf_reward_violation = max(
+            0.0,
+            self.hocbf_reward_margin - float(raw_hocbf["hocbf_margin"]),
+        )
+        hocbf_reward_penalty = self.hocbf_reward_lambda * (
+            hocbf_reward_violation / self.hocbf_reward_scale
+        ) ** 2
+
         use_substep_filter = self._substep_filter_enabled(record)
         simulator_action = (
             np.asarray(record["raw_action"], dtype=np.float32)
@@ -628,7 +669,12 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             self.lambda_delta * float(record["correction_norm_normalized"]) ** 2
             + self.lambda_intervention * float(record["intervened"])
         )
-        reward = float(reward) - float(correction_penalty) - float(action_rate_penalty)
+        reward = (
+            float(reward)
+            - float(correction_penalty)
+            - float(action_rate_penalty)
+            - float(hocbf_reward_penalty)
+        )
         self._previous_executed_action_normalized = executed_normalized_action.copy()
         info = dict(info)
         raw = np.asarray(record["raw_action"], dtype=np.float32)
@@ -658,6 +704,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 "cbf_projection_source": str(record["projection_source"]),
                 "cbf_substep_filter_enabled": bool(use_substep_filter),
                 "cbf_substep_count": int(record.get("substep_count", 0)),
+                "cbf_callback_evaluation_count": int(
+                    record.get("substep_count", 0)
+                ),
                 "cbf_substep_intervention_steps": int(
                     record.get("substep_intervention_steps", 0)
                 ),
@@ -673,6 +722,23 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 "cbf_hocbf_condition_satisfied": bool(
                     record.get("hocbf_condition_satisfied", True)
                 ),
+                "cbf_hocbf_raw_min_margin": float(
+                    raw_hocbf["hocbf_margin"]
+                ),
+                "cbf_hocbf_raw_max_violation": float(
+                    raw_hocbf["max_hocbf_violation_safe"]
+                ),
+                "cbf_hocbf_raw_mean_violation": float(
+                    raw_hocbf["hocbf_mean_violation"]
+                ),
+                "cbf_hocbf_raw_max_abs_residual": float(
+                    raw_hocbf["hocbf_max_abs_residual"]
+                ),
+                "cbf_hocbf_reward_violation": float(hocbf_reward_violation),
+                "cbf_hocbf_reward_penalty": float(hocbf_reward_penalty),
+                "cbf_hocbf_reward_lambda": float(self.hocbf_reward_lambda),
+                "cbf_hocbf_reward_scale": float(self.hocbf_reward_scale),
+                "cbf_hocbf_reward_margin": float(self.hocbf_reward_margin),
                 "cbf_max_constraint_violation_safe": float(
                     record["max_constraint_violation_safe"]
                 ),
