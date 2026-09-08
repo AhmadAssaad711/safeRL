@@ -21,6 +21,11 @@ import numpy as np
 import pandas as pd
 import torch as th
 
+from scripts.common.action_units import (
+    normalized_action_delta_norm,
+    physical_to_normalized_action,
+    unbounded_action_clip_norm,
+)
 from scripts.common.cbf_projection import (
     project_polytope_2d_numpy,
     split_cbf_context_numpy,
@@ -40,21 +45,48 @@ def _finite_mean(values: Any, default: float = np.nan) -> float:
     return float(array.mean()) if array.size else float(default)
 
 
+def _local_physical_action_scale(
+    action_phys: np.ndarray, low: np.ndarray, high: np.ndarray
+) -> np.ndarray:
+    """Return the local physical-per-normalized scale for constraint rows."""
+
+    affine_scale = 0.5 * (high - low)
+    zero_crossing = (low < 0.0) & (high > 0.0)
+    signed_scale = np.where(action_phys >= 0.0, high, np.abs(low))
+    return np.where(zero_crossing, signed_scale, affine_scale)
+
+
 def _action_stages(model: Any, observation: np.ndarray) -> dict[str, np.ndarray]:
     stages = model.predict_action_stages(observation, deterministic=True)
     low = np.asarray(model.action_space.low, dtype=np.float32).reshape(2)
     high = np.asarray(model.action_space.high, dtype=np.float32).reshape(2)
-    mu_raw = np.asarray(stages["mu_raw"], dtype=np.float32).reshape(2)
-    mu_safe = np.asarray(stages["mu_safe"], dtype=np.float32).reshape(2)
-    # This is the action executed in the RAW deployment mode.  For a projected
-    # policy it includes the architectural mean projection but excludes the
-    # final hard sample projection.  mu_raw is retained separately to measure
-    # internalization by the underlying network.
-    policy_action = np.clip(mu_safe, low, high).astype(np.float32)
+    actor_mean = np.asarray(
+        stages.get("actor_mean_phys", stages.get("mu_raw")), dtype=np.float32
+    ).reshape(2)
+    actor_latent = np.asarray(
+        stages.get("actor_latent_phys", stages.get("latent_z", actor_mean)),
+        dtype=np.float32,
+    ).reshape(2)
+    box_clipped = np.asarray(
+        stages.get("box_clipped_phys", np.clip(actor_latent, low, high)),
+        dtype=np.float32,
+    ).reshape(2)
+    box_clipped = np.clip(box_clipped, low, high).astype(np.float32)
+    cbf_safe = np.asarray(
+        stages.get("cbf_safe_phys", stages.get("executed_phys", box_clipped)),
+        dtype=np.float32,
+    ).reshape(2)
+    actor_mean_safe = np.asarray(
+        stages.get("mu_safe", stages.get("actor_mean_safe_phys", cbf_safe)),
+        dtype=np.float32,
+    ).reshape(2)
     return {
-        "mu_raw": mu_raw,
-        "mu_safe": mu_safe,
-        "policy_action": policy_action,
+        "actor_mean_phys": actor_mean,
+        "actor_mean_safe_phys": actor_mean_safe,
+        "actor_latent_phys": actor_latent,
+        "box_clipped_phys": box_clipped,
+        "cbf_safe_phys": cbf_safe,
+        "policy_action": box_clipped,
     }
 
 
@@ -171,26 +203,27 @@ def collect_state_candidates(
                     ]
                     road_width = float(env.unwrapped.config["road_width"])
                     stages = _action_stages(model, np.asarray(observation))
-                    policy_action = stages["policy_action"]
+                    box_clipped = stages["box_clipped_phys"]
                     _, rows, bounds, mask = split_cbf_context_numpy(observation)
                     projection = project_polytope_2d_numpy(
-                        policy_action,
+                        box_clipped,
                         rows,
                         bounds,
                         mask,
                         action_low=model.action_space.low,
                         action_high=model.action_space.high,
                     )
-                    half_range = np.maximum(
-                        0.5
-                        * (
-                            np.asarray(model.action_space.high, dtype=float)
-                            - np.asarray(model.action_space.low, dtype=float)
-                        ),
-                        1e-6,
+                    correction = normalized_action_delta_norm(
+                        projection.action,
+                        box_clipped,
+                        model.action_space.low,
+                        model.action_space.high,
                     )
-                    correction = float(
-                        np.linalg.norm((projection.action - policy_action) / half_range)
+                    actuator_clip = unbounded_action_clip_norm(
+                        stages["actor_latent_phys"],
+                        box_clipped,
+                        model.action_space.low,
+                        model.action_space.high,
                     )
                     metrics = occupancy_metrics(
                         namespace,
@@ -204,7 +237,7 @@ def collect_state_candidates(
                         ttc_cap=float(ttc_cap),
                     )
                     next_observation, _, terminated, truncated, step_info = env.step(
-                        policy_action
+                        box_clipped
                     )
                     overtaking = _is_overtaking_state(ego, neighbors, step_info)
                     state_hash = stable_state_hash(
@@ -223,6 +256,8 @@ def collect_state_candidates(
                             correction > float(correction_epsilon)
                         ),
                         "correction_box_norm": correction,
+                        "cbf_correction_norm": correction,
+                        "actuator_clip_norm": actuator_clip,
                         "qp_success": bool(projection.feasible),
                         "fallback_used": bool(projection.fallback_used),
                     }
@@ -261,7 +296,6 @@ def evaluate_fixed_state_bank(
     for (training_seed, variant), model in sorted(models.items()):
         low = np.asarray(model.action_space.low, dtype=float).reshape(2)
         high = np.asarray(model.action_space.high, dtype=float).reshape(2)
-        half_range = np.maximum(0.5 * (high - low), 1e-6)
         rng = np.random.default_rng(int(seed) + 1009 * int(training_seed))
         for state in bank:
             observation = np.asarray(state["observation"], dtype=np.float32)
@@ -272,22 +306,31 @@ def evaluate_fixed_state_bank(
             system_rows = np.asarray(padded_rows[active_mask], dtype=float)
             system_bounds = np.asarray(padded_bounds[active_mask], dtype=float)
             stages = _action_stages(model, observation)
-            mu_raw = stages["mu_raw"].astype(float)
-            mu_safe = stages["mu_safe"].astype(float)
+            actor_mean = stages["actor_mean_phys"].astype(float)
+            actor_mean_safe = stages["actor_mean_safe_phys"].astype(float)
+            actor_latent = stages["actor_latent_phys"].astype(float)
+            box_clipped = stages["box_clipped_phys"].astype(float)
+            cbf_safe = stages["cbf_safe_phys"].astype(float)
             policy_action = stages["policy_action"].astype(float)
             projection = project_polytope_2d_numpy(
-                policy_action,
+                box_clipped,
                 system_rows,
                 system_bounds,
                 action_low=low,
                 action_high=high,
             )
             hard_safe = projection.action.astype(float)
-            delta = hard_safe - policy_action
-            delta_scaled = delta / half_range
+            delta = hard_safe - box_clipped
+            delta_scaled = physical_to_normalized_action(
+                hard_safe, low, high
+            ).astype(float) - physical_to_normalized_action(
+                box_clipped, low, high
+            ).astype(float)
             active_indices = projection.active_indices.astype(int)
             active_rows = system_rows[active_indices]
-            active_scaled = active_rows * half_range.reshape(1, 2)
+            active_scaled = active_rows * _local_physical_action_scale(
+                box_clipped, low, high
+            ).reshape(1, 2)
             basis_source = "active_constraints"
             if active_rows.shape[0] == 0 and np.linalg.norm(delta_scaled) > 1e-10:
                 active_rows = delta.reshape(1, 2)
@@ -307,30 +350,34 @@ def evaluate_fixed_state_bank(
             sample_corrections: list[float] = []
             sample_interventions: list[float] = []
             sample_fallbacks: list[float] = []
+            sample_actor_clips: list[float] = []
             for latent_z in rng.normal(
                 loc=distribution_mean,
                 scale=distribution_std,
                 size=(int(stochastic_samples), 2),
             ):
                 sample_projection = project_polytope_2d_numpy(
-                    latent_z,
+                    np.clip(latent_z, low, high),
                     system_rows,
                     system_bounds,
                     action_low=low,
                     action_high=high,
                 )
-                sample_correction = float(
-                    np.linalg.norm(
-                        (sample_projection.action - latent_z) / half_range
-                    )
+                sample_box = np.clip(latent_z, low, high)
+                sample_correction = normalized_action_delta_norm(
+                    sample_projection.action, sample_box, low, high
                 )
                 sample_corrections.append(sample_correction)
+                sample_actor_clips.append(
+                    unbounded_action_clip_norm(latent_z, sample_box, low, high)
+                )
                 sample_interventions.append(
                     float(sample_correction > float(correction_epsilon))
                 )
                 sample_fallbacks.append(float(sample_projection.fallback_used))
 
-            internal_delta = mu_safe - mu_raw
+            mean_box = np.clip(actor_mean, low, high)
+            internal_delta = actor_mean_safe - mean_box
             normal = np.asarray(physical["normal"], dtype=float)
             tangent = np.asarray(physical["tangent"], dtype=float)
             rows_out.append(
@@ -341,28 +388,42 @@ def evaluate_fixed_state_bank(
                     "state_hash": str(state["state_hash"]),
                     "stratum": str(state["stratum"]),
                     "categories": "|".join(map(str, state["categories"])),
-                    "mu_raw_ax": float(mu_raw[0]),
-                    "mu_raw_ay": float(mu_raw[1]),
-                    "mu_safe_ax": float(mu_safe[0]),
-                    "mu_safe_ay": float(mu_safe[1]),
+                    "mu_raw_ax": float(actor_mean[0]),
+                    "mu_raw_ay": float(actor_mean[1]),
+                    "mu_safe_ax": float(cbf_safe[0]),
+                    "mu_safe_ay": float(cbf_safe[1]),
+                    "actor_latent_ax": float(actor_latent[0]),
+                    "actor_latent_ay": float(actor_latent[1]),
+                    "box_clipped_ax": float(box_clipped[0]),
+                    "box_clipped_ay": float(box_clipped[1]),
                     "policy_action_ax": float(policy_action[0]),
                     "policy_action_ay": float(policy_action[1]),
                     "safe_ax": float(hard_safe[0]),
                     "safe_ay": float(hard_safe[1]),
                     "internal_mean_delta_ax": float(internal_delta[0]),
                     "internal_mean_delta_ay": float(internal_delta[1]),
-                    "internal_mean_correction_norm": float(
-                        np.linalg.norm(internal_delta / half_range)
+                    "internal_mean_correction_norm": normalized_action_delta_norm(
+                        actor_mean_safe, mean_box, low, high
                     ),
                     "delta_ax": float(delta[0]),
                     "delta_ay": float(delta[1]),
                     "correction_physical_norm": float(np.linalg.norm(delta)),
                     "correction_box_norm": float(np.linalg.norm(delta_scaled)),
+                    "cbf_correction_norm": float(np.linalg.norm(delta_scaled)),
+                    "actuator_clip_norm": unbounded_action_clip_norm(
+                        actor_latent, box_clipped, low, high
+                    ),
+                    "mean_actor_clip_norm": unbounded_action_clip_norm(
+                        actor_mean, mean_box, low, high
+                    ),
+                    "mean_cbf_correction_norm": normalized_action_delta_norm(
+                        actor_mean_safe, mean_box, low, high
+                    ),
                     "intervention": bool(
                         np.linalg.norm(delta_scaled) > float(correction_epsilon)
                     ),
                     "raw_policy_feasible": bool(
-                        np.max(system_rows @ policy_action - system_bounds)
+                        np.max(system_rows @ box_clipped - system_bounds)
                         <= 1e-6
                     ),
                     "qp_success": bool(projection.feasible),
@@ -389,6 +450,9 @@ def evaluate_fixed_state_bank(
                     ),
                     "sample_mean_correction_box_norm": _finite_mean(
                         sample_corrections, 0.0
+                    ),
+                    "sample_actor_clip_norm_mean": _finite_mean(
+                        sample_actor_clips, 0.0
                     ),
                     "sample_fallback_probability": _finite_mean(
                         sample_fallbacks, 0.0

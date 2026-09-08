@@ -4,6 +4,8 @@ Data semantics are intentionally explicit:
 
 * a detached-feedback policy uses ``Normal(mu_raw, sigma)``;
 * a differentiable projected policy uses ``Normal(mu_safe, sigma)``;
+* actor means and Gaussian samples are physical action values;
+* actuator clipping is applied before CBF projection;
 * the rollout buffer action is the latent Gaussian sample ``z``;
 * its stored log probability is ``log pi(z | s)``;
 * the simulator receives the separate hard projection ``P_s(z)``.
@@ -222,6 +224,7 @@ class ProjectedPolicyEvaluation:
     entropy: Optional[th.Tensor]
     distribution: DiagGaussianDistribution
     mu_raw: th.Tensor
+    mu_box: th.Tensor
     mu_safe: th.Tensor
     projection: TorchProjection2D
 
@@ -378,6 +381,7 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
     def project_actions(
         self, obs: th.Tensor, actions: th.Tensor
     ) -> TorchProjection2D:
+        actions = self.box_clipped_actions(actions)
         _, rows, bounds, mask = split_cbf_context_torch(
             obs, layout=self.cbf_layout
         )
@@ -395,12 +399,24 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
             ),
         )
 
+    def box_clipped_actions(self, actions: th.Tensor) -> th.Tensor:
+        """Apply actuator clipping before any CBF projection."""
+
+        low = th.as_tensor(
+            self.action_space.low, dtype=actions.dtype, device=actions.device
+        )
+        high = th.as_tensor(
+            self.action_space.high, dtype=actions.dtype, device=actions.device
+        )
+        return th.minimum(th.maximum(actions, low), high)
+
     def _distribution_and_stages(
         self, obs: th.Tensor
     ) -> tuple[
         DiagGaussianDistribution,
         th.Tensor,
         Optional[th.Tensor],
+        th.Tensor,
         th.Tensor,
         th.Tensor,
         TorchProjection2D,
@@ -413,7 +429,8 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
             # corrections, so a softplus keeps it non-negative.
             safety_values = F.softplus(self.safety_value_net(latent_vf))
         mu_raw = self.action_net(latent_pi)
-        projection = self.project_actions(obs, mu_raw)
+        mu_box = self.box_clipped_actions(mu_raw)
+        projection = self.project_actions(obs, mu_box)
         # No mathematical projection exists when the no-slack set is empty.
         # Use the shared labelled fallback for behavior, but do not claim or
         # propagate an optimization-layer Jacobian through that fallback.
@@ -424,7 +441,7 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
         )
         distribution = self.action_dist.proba_distribution(mu_safe, self.log_std)
         assert isinstance(distribution, DiagGaussianDistribution)
-        return distribution, values, safety_values, mu_raw, mu_safe, projection
+        return distribution, values, safety_values, mu_raw, mu_box, mu_safe, projection
 
     def predict_safety_values(self, obs: th.Tensor) -> th.Tensor:
         """Predict discounted future CBF-correction cost from the value branch."""
@@ -437,7 +454,7 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
     def forward(
         self, obs: th.Tensor, deterministic: bool = False
     ) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
-        distribution, values, _, _, _, _ = self._distribution_and_stages(obs)
+        distribution, values, _, _, _, _, _ = self._distribution_and_stages(obs)
         latent_z = distribution.get_actions(deterministic=deterministic)
         log_prob = distribution.log_prob(latent_z)
         latent_z = latent_z.reshape((-1, *self.action_space.shape))
@@ -446,7 +463,15 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
     def evaluate_actions_with_projection(
         self, obs: th.Tensor, actions: th.Tensor
     ) -> ProjectedPolicyEvaluation:
-        distribution, values, safety_values, mu_raw, mu_safe, projection = (
+        (
+            distribution,
+            values,
+            safety_values,
+            mu_raw,
+            mu_box,
+            mu_safe,
+            projection,
+        ) = (
             self._distribution_and_stages(obs)
         )
         return ProjectedPolicyEvaluation(
@@ -456,6 +481,7 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
             entropy=distribution.entropy(),
             distribution=distribution,
             mu_raw=mu_raw,
+            mu_box=mu_box,
             mu_safe=mu_safe,
             projection=projection,
         )
@@ -467,7 +493,7 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
         return result.values, result.log_prob, result.entropy
 
     def get_distribution(self, obs: th.Tensor) -> Distribution:
-        distribution, _, _, _, _, _ = self._distribution_and_stages(obs)
+        distribution, _, _, _, _, _, _ = self._distribution_and_stages(obs)
         return distribution
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
@@ -483,15 +509,21 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
     ) -> dict[str, th.Tensor]:
         """Return raw mean, safe mean, latent z, and final hard projection."""
 
-        distribution, _, _, mu_raw, mu_safe, mean_projection = (
+        distribution, _, _, mu_raw, mu_box, mu_safe, mean_projection = (
             self._distribution_and_stages(obs)
         )
         latent_z = distribution.get_actions(deterministic=deterministic)
         executed_projection = self.project_actions(obs, latent_z)
         return {
             "mu_raw": mu_raw,
+            "mu_box": mu_box,
             "mu_safe": mu_safe,
             "latent_z": latent_z,
+            "actor_mean_phys": mu_raw,
+            "actor_latent_phys": latent_z,
+            "box_clipped_phys": self.box_clipped_actions(latent_z),
+            "cbf_safe_phys": executed_projection.action,
+            "executed_phys": executed_projection.action,
             "executed_action": executed_projection.action,
             "mean_feasible": mean_projection.feasible,
             "sample_feasible": executed_projection.feasible,
@@ -569,14 +601,15 @@ class LatentActionPPO(PPO):
         executed = np.empty_like(latent_actions)
         records: list[dict[str, Any]] = []
         for env_index in range(batch_size):
-            raw = latent_actions[env_index]
+            actor_latent_phys = latent_actions[env_index]
+            box_clipped_phys = np.clip(actor_latent_phys, low, high).astype(np.float32)
             active = np.asarray(mask[env_index] > 0.5, dtype=bool)
             active_rows = np.asarray(rows[env_index][active], dtype=np.float32)
             active_bounds = np.asarray(bounds[env_index][active], dtype=np.float32)
             context_hash = constraint_system_hash(active_rows, active_bounds)
             if self.execution_mode == "cbf":
                 projection = project_polytope_2d_numpy(
-                    raw,
+                    box_clipped_phys,
                     rows[env_index],
                     bounds[env_index],
                     mask[env_index],
@@ -595,7 +628,7 @@ class LatentActionPPO(PPO):
                     "cbf_applied": True,
                 }
             else:
-                safe = np.clip(raw, low, high).astype(np.float32)
+                safe = box_clipped_phys
                 record = {
                     "feasible": True,
                     "fallback_used": False,
@@ -606,6 +639,14 @@ class LatentActionPPO(PPO):
                     "cbf_applied": False,
                 }
             executed[env_index] = safe
+            record.update(
+                {
+                    "actor_latent_phys": actor_latent_phys.copy(),
+                    "box_clipped_phys": box_clipped_phys.copy(),
+                    "cbf_safe_phys": np.asarray(safe, dtype=np.float32).copy(),
+                    "executed_phys": np.asarray(safe, dtype=np.float32).copy(),
+                }
+            )
             records.append(record)
         return executed, records
 
@@ -641,11 +682,16 @@ class LatentActionPPO(PPO):
             executed_actions, projection_records = self._execution_actions(
                 latent_actions, np.asarray(self._last_obs)
             )
+            box_clipped_actions = np.asarray(
+                [record["box_clipped_phys"] for record in projection_records],
+                dtype=np.float32,
+            )
             for env_index, record in enumerate(projection_records):
                 env.env_method(
                     "set_projection_record",
                     latent_actions[env_index],
                     executed_actions[env_index],
+                    box_clipped_phys=box_clipped_actions[env_index],
                     feasible=bool(record["feasible"]),
                     fallback_used=bool(record["fallback_used"]),
                     projection_source=str(record["projection_source"]),
@@ -661,7 +707,11 @@ class LatentActionPPO(PPO):
             # The callback sees both quantities.  Crucially, RolloutBuffer.add
             # below receives latent_actions, never executed_actions.
             actions = latent_actions
-            clipped_actions = executed_actions
+            # SB3 callbacks use ``clipped_actions`` for actuator-box clipping.
+            # CBF-safe actions are exposed separately through info and the
+            # projection records, so box saturation is not mislabeled as CBF
+            # intervention.
+            clipped_actions = box_clipped_actions
             new_obs, rewards, dones, infos = env.step(executed_actions)
             self.num_timesteps += env.num_envs
             callback.update_locals(locals())
@@ -777,6 +827,15 @@ class LatentActionPPO(PPO):
                     "mu_raw": distribution.distribution.mean.detach().cpu().numpy(),
                     "mu_safe": distribution.distribution.mean.detach().cpu().numpy(),
                     "latent_z": latent_np,
+                    "actor_mean_phys": distribution.distribution.mean.detach().cpu().numpy(),
+                    "actor_latent_phys": latent_np,
+                    "box_clipped_phys": np.clip(
+                        latent_np,
+                        np.asarray(self.action_space.low, dtype=np.float32),
+                        np.asarray(self.action_space.high, dtype=np.float32),
+                    ),
+                    "cbf_safe_phys": executed,
+                    "executed_phys": executed,
                     "executed_action": executed,
                 }
         if not vectorized:
@@ -879,11 +938,22 @@ class DetachedCBFActorPPO(LatentActionPPO):
         """Return a current-mean CBF target with no solver gradient path."""
 
         with th.no_grad():
+            low = th.as_tensor(
+                self.action_space.low,
+                dtype=mean_actions.dtype,
+                device=mean_actions.device,
+            )
+            high = th.as_tensor(
+                self.action_space.high,
+                dtype=mean_actions.dtype,
+                device=mean_actions.device,
+            )
+            box_mean = th.minimum(th.maximum(mean_actions.detach(), low), high)
             _, rows, bounds, mask = split_cbf_context_torch(
                 observations, layout=self.cbf_layout
             )
             return project_polytope_2d_torch(
-                mean_actions.detach(),
+                box_mean,
                 rows,
                 bounds,
                 mask,
@@ -904,11 +974,13 @@ class DetachedCBFActorPPO(LatentActionPPO):
     def detached_actor_loss(
         mean_actions: th.Tensor,
         projection: TorchProjection2D,
+        reference_actions: Optional[th.Tensor] = None,
     ) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """Compute the feasible-target loss, correction, and infeasible rate."""
 
         safe_target = projection.action.detach()
-        delta = mean_actions - safe_target
+        reference = mean_actions if reference_actions is None else reference_actions
+        delta = reference - safe_target
         feasible = projection.feasible.to(delta.dtype)
         denominator = feasible.sum().clamp_min(1.0)
         loss = (delta.square().sum(dim=1) * feasible).sum() / denominator
@@ -994,8 +1066,21 @@ class DetachedCBFActorPPO(LatentActionPPO):
                 projection = self.project_actor_mean_detached(
                     rollout_data.observations, evaluation.mu_raw
                 )
+                low = th.as_tensor(
+                    self.action_space.low,
+                    dtype=evaluation.mu_raw.dtype,
+                    device=evaluation.mu_raw.device,
+                )
+                high = th.as_tensor(
+                    self.action_space.high,
+                    dtype=evaluation.mu_raw.dtype,
+                    device=evaluation.mu_raw.device,
+                )
+                mean_box = th.minimum(th.maximum(evaluation.mu_raw, low), high)
                 mean_loss, mean_correction, mean_infeasible_rate = (
-                    self.detached_actor_loss(evaluation.mu_raw, projection)
+                    self.detached_actor_loss(
+                        evaluation.mu_raw, projection, reference_actions=mean_box
+                    )
                 )
                 mean_losses.append(float(mean_loss.detach().cpu().item()))
                 mean_corrections.append(
@@ -1332,7 +1417,10 @@ class ProjectedCBFPPO(LatentActionPPO):
                     evaluation.mu_safe,
                     evaluation.mu_safe.detach(),
                 )
-                mean_delta = evaluation.mu_raw - mean_target
+                # The auxiliary target measures CBF intervention after the
+                # actuator box.  Saturation of the actor mean is not a CBF
+                # correction and must not enter this loss.
+                mean_delta = evaluation.mu_box - mean_target
                 mean_feasible = evaluation.projection.feasible.to(mean_delta.dtype)
                 mean_denominator = mean_feasible.sum().clamp_min(1.0)
                 mean_loss = (
@@ -1363,12 +1451,13 @@ class ProjectedCBFPPO(LatentActionPPO):
                     fresh_projection = self.policy.project_actions(
                         rollout_data.observations, fresh_z
                     )
+                    fresh_box = self.policy.box_clipped_actions(fresh_z)
                     fresh_target = th.where(
                         fresh_projection.feasible.unsqueeze(1),
                         fresh_projection.action,
                         fresh_projection.action.detach(),
                     )
-                    sample_delta = fresh_z - fresh_target
+                    sample_delta = fresh_box - fresh_target
                     sample_feasible = fresh_projection.feasible.to(
                         sample_delta.dtype
                     )

@@ -22,6 +22,12 @@ class _BaseEnv(gym.Env):
         self.config = {
             "road_width": 10.2,
             "cbf_substep_filtering": False,
+            "bounds": {
+                "ax_min": -3.0,
+                "ax_max": 3.0,
+                "ay_min": -3.0,
+                "ay_max": 3.0,
+            },
         }
         self.vehicle = object()
 

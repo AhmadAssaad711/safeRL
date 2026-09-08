@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
+import pytest
 
 from scripts.common.ppo_cbf_env import CBFContextPhysicalActionWrapper
 from scripts.training.run_cbf_filter_ablation import cbf_state_occupancy_metrics
@@ -92,9 +93,22 @@ def test_wrapper_constructor_accepts_separate_psi1_gain():
         observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(2,), dtype=np.float32)
         action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
 
+        def __init__(self):
+            self.config = {
+                "bounds": {
+                    "ax_min": -3.0,
+                    "ax_max": 3.0,
+                    "ay_min": -3.0,
+                    "ay_max": 3.0,
+                }
+            }
+
     wrapper = CBFContextPhysicalActionWrapper(
         BareEnv(),
-        namespace={"CBF_PSI1_GAIN": 2.3},
+        namespace={
+            "CBF_PSI1_GAIN": 2.3,
+            "_lane_free_base": lambda wrapper: wrapper.unwrapped,
+        },
         ax_bounds=(-3.0, 3.0),
         ay_bounds=(-3.0, 3.0),
         neighbor_range=90.0,
@@ -106,3 +120,33 @@ def test_wrapper_constructor_accepts_separate_psi1_gain():
         base_observation_dim=2,
     )
     assert wrapper.psi1_gain == 2.3
+
+
+def test_wrapper_constructor_rejects_mismatched_cbf_and_environment_bounds():
+    class BareEnv(gym.Env):
+        observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(2,), dtype=np.float32)
+        action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+
+        def __init__(self):
+            self.config = {
+                "bounds": {
+                    "ax_min": -6.0,
+                    "ax_max": 3.0,
+                    "ay_min": -4.0,
+                    "ay_max": 4.0,
+                }
+            }
+
+    with pytest.raises(ValueError, match="disagree"):
+        CBFContextPhysicalActionWrapper(
+            BareEnv(),
+            namespace={"_lane_free_base": lambda wrapper: wrapper.unwrapped},
+            ax_bounds=(-3.0, 3.0),
+            ay_bounds=(-3.0, 3.0),
+            neighbor_range=90.0,
+            eps_side=0.1,
+            k0=5.29,
+            k1=4.6,
+            max_neighbor_constraints=1,
+            base_observation_dim=2,
+        )

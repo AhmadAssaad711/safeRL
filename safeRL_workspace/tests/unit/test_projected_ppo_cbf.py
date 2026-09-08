@@ -180,6 +180,7 @@ class _ProjectionRecordEnv(gym.Env):
         self.observation = _augmented_observation()
         self.pending = None
         self.raw_actions: list[np.ndarray] = []
+        self.box_actions: list[np.ndarray] = []
         self.executed_actions: list[np.ndarray] = []
 
     def reset(self, *, seed=None, options=None):
@@ -195,11 +196,14 @@ class _ProjectionRecordEnv(gym.Env):
 
     def step(self, action):
         assert self.pending is not None
-        raw, expected_safe, _ = self.pending
+        raw, expected_safe, metadata = self.pending
         self.pending = None
         action = np.asarray(action, dtype=np.float32)
         np.testing.assert_allclose(action, expected_safe, atol=1e-6)
         self.raw_actions.append(raw)
+        self.box_actions.append(
+            np.asarray(metadata["box_clipped_phys"], dtype=np.float32).copy()
+        )
         self.executed_actions.append(action.copy())
         return self.observation.copy(), 0.0, False, False, {}
 
@@ -309,6 +313,9 @@ def test_rollout_buffer_stores_unclipped_z_while_env_receives_projection():
     assert len(env.raw_actions) == 2
     assert len(env.executed_actions) == 2
     np.testing.assert_allclose(np.asarray(env.raw_actions), stored_z, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(env.box_actions)[:, 0], np.full(2, 3.0), atol=1e-6
+    )
     np.testing.assert_allclose(
         np.asarray(env.executed_actions)[:, 0], np.zeros(2), atol=1e-6
     )
@@ -444,8 +451,10 @@ def test_projected_ppo_collector_uses_projected_mean_logprob_and_hard_sample():
 
     stored_z = np.asarray(model.rollout_buffer.actions).reshape(-1, 2)
     raw = np.asarray(env.raw_actions)
+    box = np.asarray(env.box_actions)
     executed = np.asarray(env.executed_actions)
     np.testing.assert_allclose(raw, stored_z, atol=1e-6)
+    np.testing.assert_allclose(box[:, 0], np.minimum(stored_z[:, 0], 3.0), atol=1e-6)
     assert np.any(stored_z[:, 0] > 0.0)
     np.testing.assert_allclose(
         executed[:, 0], np.minimum(stored_z[:, 0], 0.0), atol=1e-6

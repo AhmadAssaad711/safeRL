@@ -578,11 +578,11 @@ def filter_physical_bounds(
     env_low, env_high = pipeline.physical_bounds(dict(run_config["env_config"]))
     ax_bounds = namespace.get("CBF_AX_BOUNDS", (float(env_low[0]), float(env_high[0])))
     ay_bounds = namespace.get("CBF_AY_BOUNDS", (float(env_low[1]), float(env_high[1])))
-    low = np.asarray([float(ax_bounds[0]), float(ay_bounds[0])], dtype=np.float32)
-    high = np.asarray([float(ax_bounds[1]), float(ay_bounds[1])], dtype=np.float32)
-    if not np.all(np.isfinite(low)) or not np.all(np.isfinite(high)) or np.any(high <= low):
-        raise ValueError(f"invalid configured CBF action bounds: low={low}, high={high}")
-    return low, high
+    return pipeline.validate_matching_physical_action_bounds(
+        [float(ax_bounds[0]), float(ay_bounds[0])],
+        [float(ax_bounds[1]), float(ay_bounds[1])],
+        dict(run_config["env_config"]),
+    )
 
 
 def _neighbor_constraint_type(ego: Mapping[str, Any], neighbor: Mapping[str, Any]) -> str:
@@ -764,9 +764,16 @@ def collect_shielded_state_candidates(
                     }
                     safe_action, filter_info = _filter_action(namespace, raw_action, state, run_config)
                     low, high = filter_physical_bounds(namespace, run_config)
-                    half_range = np.maximum(0.5 * (high - low), 1e-6)
-                    delta_box = (safe_action - raw_action) / half_range
+                    box_action = np.clip(raw_action, low, high)
+                    delta_box = pipeline.physical_to_normalized(
+                        safe_action, env_config
+                    ).astype(float) - pipeline.physical_to_normalized(
+                        box_action, env_config
+                    ).astype(float)
                     correction_box_norm = float(np.linalg.norm(delta_box))
+                    actuator_clip_norm = pipeline.unbounded_action_clip_norm(
+                        raw_action, box_action, low, high
+                    )
                     metrics = occupancy_metrics(
                         namespace,
                         ego,
@@ -796,6 +803,8 @@ def collect_shielded_state_candidates(
                         "safe_action_ax": float(safe_action[0]),
                         "safe_action_ay": float(safe_action[1]),
                         "correction_box_norm": correction_box_norm,
+                        "cbf_correction_norm": correction_box_norm,
+                        "actuator_clip_norm": actuator_clip_norm,
                         "intervention": bool(correction_box_norm > correction_epsilon),
                         "qp_success": bool(filter_info.get("qp_success", False)),
                         "fallback_used": bool(filter_info.get("fallback_used", False)),
@@ -903,7 +912,6 @@ def evaluate_common_state_bank(
 
     env_config = dict(run_config["env_config"])
     low, high = filter_physical_bounds(namespace, run_config)
-    half_range = np.maximum(0.5 * (high - low), 1e-6).astype(float)
     correction_epsilon = float(run_config["correction_epsilon_normalized"])
     rows: list[dict[str, Any]] = []
     for (training_seed, variant), model in sorted(models.items()):
@@ -918,10 +926,18 @@ def evaluate_common_state_bank(
                 compute_q=True,
             )
             raw_action = np.asarray(raw_action, dtype=float).reshape(2)
+            box_action = np.clip(raw_action, low, high)
             safe_action, filter_info = _filter_action(namespace, raw_action, state, run_config)
             safe_action = np.asarray(safe_action, dtype=float).reshape(2)
-            delta_phys = safe_action - raw_action
-            delta_box = delta_phys / half_range
+            delta_phys = safe_action - box_action
+            delta_box = pipeline.physical_to_normalized(
+                safe_action, env_config
+            ).astype(float) - pipeline.physical_to_normalized(
+                box_action, env_config
+            ).astype(float)
+            actor_clip_norm = pipeline.unbounded_action_clip_norm(
+                raw_action, box_action, low, high
+            )
             correction_phys = float(np.linalg.norm(delta_phys))
             correction_box = float(np.linalg.norm(delta_box))
             active_phys, active_scaled, active_types, basis_source = _active_description(
@@ -967,6 +983,8 @@ def evaluate_common_state_bank(
                     "source_variant": str(state["source_variant"]),
                     "raw_ax": float(raw_action[0]),
                     "raw_ay": float(raw_action[1]),
+                    "box_clipped_ax": float(box_action[0]),
+                    "box_clipped_ay": float(box_action[1]),
                     "safe_ax": float(safe_action[0]),
                     "safe_ay": float(safe_action[1]),
                     "delta_ax": float(delta_phys[0]),
@@ -975,6 +993,8 @@ def evaluate_common_state_bank(
                     "delta_box_ax": float(delta_box[0]),
                     "delta_box_ay": float(delta_box[1]),
                     "correction_box_norm": correction_box,
+                    "cbf_correction_norm": correction_box,
+                    "actuator_clip_norm": float(actor_clip_norm),
                     "intervention": bool(correction_box > correction_epsilon),
                     "q_at_raw_actor_action": float(q_at_actor),
                     "raw_feasible": bool(filter_info.get("raw_feasible", correction_box <= 1e-10)),

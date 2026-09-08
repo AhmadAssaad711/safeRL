@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import torch as th
 
+from scripts.common.action_units import physical_to_normalized_action
 
 NOTEBOOK_DEPS = [2, 3, 5, 6, 8, 33, 35, 37, 39, 41, 43]
 
@@ -93,9 +94,7 @@ def read_action(info: dict[str, Any], x_key: str, y_key: str, fallback: np.ndarr
 def to_actor_scale(action_phys: np.ndarray, action_space: Any) -> np.ndarray:
     low = np.asarray(action_space.low, dtype=np.float32).reshape(-1)[:2]
     high = np.asarray(action_space.high, dtype=np.float32).reshape(-1)[:2]
-    action_phys = np.asarray(action_phys, dtype=np.float32).reshape(-1)[:2]
-    scaled = 2.0 * ((np.clip(action_phys, low, high) - low) / np.maximum(high - low, 1e-6)) - 1.0
-    return np.clip(scaled, -1.0, 1.0).astype(np.float32)
+    return physical_to_normalized_action(action_phys, low, high)
 
 
 def percentile(values: np.ndarray, q: float) -> float:
@@ -165,7 +164,17 @@ def collect_diagnostic_batch(
             safe_phys = read_action(info, "cbf_a_safe_x", "cbf_a_safe_y", raw_phys)
             raw_scaled = to_actor_scale(raw_phys, env.action_space)
             safe_scaled = to_actor_scale(safe_phys, env.action_space)
-            correction_norm = float(info.get("cbf_correction_norm", np.linalg.norm(safe_phys - raw_phys)))
+            box_phys = np.clip(
+                raw_phys,
+                np.asarray(env.action_space.low, dtype=np.float32),
+                np.asarray(env.action_space.high, dtype=np.float32),
+            )
+            correction_norm = float(
+                info.get(
+                    "cbf_correction_norm_normalized",
+                    np.linalg.norm(to_actor_scale(safe_phys, env.action_space) - to_actor_scale(box_phys, env.action_space)),
+                )
+            )
             scaled_correction_norm = float(np.linalg.norm(safe_scaled - raw_scaled))
             intervention = bool(info.get("cbf_intervened", correction_norm > 1e-6))
             qp_success = bool(info.get("cbf_qp_success", True))

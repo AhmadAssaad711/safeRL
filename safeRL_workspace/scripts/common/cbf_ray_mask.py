@@ -9,6 +9,8 @@ import gymnasium as gym
 import numpy as np
 from stable_baselines3.common.monitor import Monitor
 
+from scripts.common.action_units import validate_matching_physical_action_bounds
+
 
 RAY_MASK_DIRECTION_EPS = 1e-8
 RAY_MASK_CONSTRAINT_EPS = 1e-8
@@ -401,6 +403,12 @@ class RayMaskedSafetyFilteredAccelerationWrapper(gym.Wrapper):
         self.neighbor_range = float(neighbor_range)
         self.ax_bounds = ax_bounds
         self.ay_bounds = ay_bounds
+        base = namespace.get("_lane_free_base", lambda wrapper: wrapper.unwrapped)(self)
+        validate_matching_physical_action_bounds(
+            [self.ax_bounds[0], self.ay_bounds[0]],
+            [self.ax_bounds[1], self.ay_bounds[1]],
+            base.config,
+        )
         self.eps_side = float(eps_side)
         self.k0 = float(k0)
         self.k1 = float(k1)

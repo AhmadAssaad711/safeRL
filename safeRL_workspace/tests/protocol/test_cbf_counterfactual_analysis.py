@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 from scripts.evaluation.evaluate_cbf_counterfactuals import (
@@ -140,16 +141,27 @@ def test_typed_feasible_mask_reports_overall_and_semantic_masks() -> None:
     np.testing.assert_array_equal(masks["all"], [[True, False], [False, False]])
 
 
-def test_filter_bounds_prefer_cbf_configuration_over_environment_bounds() -> None:
+def test_filter_bounds_reject_cbf_configuration_mismatch() -> None:
     namespace = {"CBF_AX_BOUNDS": (-2.5, 1.5), "CBF_AY_BOUNDS": (-0.75, 0.9)}
     run_config = {
         "env_config": {
             "bounds": {"ax_min": -10.0, "ax_max": 10.0, "ay_min": -5.0, "ay_max": 5.0}
         }
     }
+    with pytest.raises(ValueError, match="disagree"):
+        filter_physical_bounds(namespace, run_config)
+
+
+def test_filter_bounds_match_environment_configuration() -> None:
+    namespace = {"CBF_AX_BOUNDS": (-10.0, 10.0), "CBF_AY_BOUNDS": (-5.0, 5.0)}
+    run_config = {
+        "env_config": {
+            "bounds": {"ax_min": -10.0, "ax_max": 10.0, "ay_min": -5.0, "ay_max": 5.0}
+        }
+    }
     low, high = filter_physical_bounds(namespace, run_config)
-    np.testing.assert_allclose(low, [-2.5, -0.75])
-    np.testing.assert_allclose(high, [1.5, 0.9])
+    np.testing.assert_allclose(low, [-10.0, -5.0])
+    np.testing.assert_allclose(high, [10.0, 5.0])
 
 
 def test_factorial_contrast_math_uses_paired_main_and_interaction_coefficients() -> None:

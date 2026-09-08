@@ -17,6 +17,12 @@ from typing import Any, Optional
 import gymnasium as gym
 import numpy as np
 
+from scripts.common.action_units import (
+    normalized_action_delta_norm,
+    physical_to_normalized_action,
+    unbounded_action_clip_norm,
+    validate_matching_physical_action_bounds,
+)
 from scripts.common.cbf_projection import (
     CBFContextLayout,
     NumpyProjection2D,
@@ -79,6 +85,16 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         self.namespace = namespace
         self.ax_bounds = (float(ax_bounds[0]), float(ax_bounds[1]))
         self.ay_bounds = (float(ay_bounds[0]), float(ay_bounds[1]))
+        base = namespace.get("_lane_free_base", lambda wrapper: wrapper.unwrapped)(self)
+        env_low, env_high = validate_matching_physical_action_bounds(
+            [self.ax_bounds[0], self.ay_bounds[0]],
+            [self.ax_bounds[1], self.ay_bounds[1]],
+            base.config,
+        )
+        # Keep the wrapper's public physical Box tied to the simulator config
+        # after the construction-time cross-check above.
+        self._physical_low = env_low.astype(np.float32)
+        self._physical_high = env_high.astype(np.float32)
         self.neighbor_range = float(neighbor_range)
         self.eps_side = float(eps_side)
         self.k0 = float(k0)
@@ -163,11 +179,11 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
 
     @property
     def physical_low(self) -> np.ndarray:
-        return np.asarray(self.action_space.low, dtype=np.float32)
+        return self._physical_low.copy()
 
     @property
     def physical_high(self) -> np.ndarray:
-        return np.asarray(self.action_space.high, dtype=np.float32)
+        return self._physical_high.copy()
 
     def _constraint_system(self) -> dict[str, Any]:
         ego = self.namespace["get_ego_state"](self)
@@ -221,15 +237,20 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
 
     def project_current_action(self, raw_action: Any) -> tuple[np.ndarray, dict[str, Any]]:
         system = self.current_constraint_system()
+        actor_latent = np.asarray(raw_action, dtype=np.float32).reshape(-1)[:2]
+        box_clipped = np.clip(
+            actor_latent, self.physical_low, self.physical_high
+        ).astype(np.float32)
         result = project_polytope_2d_numpy(
-            raw_action,
+            box_clipped,
             system["rows"],
             system["bounds"],
             action_low=self.physical_low,
             action_high=self.physical_high,
         )
         return result.action.copy(), self._projection_record(
-            raw_action=raw_action,
+            actor_latent_phys=actor_latent,
+            box_clipped_phys=box_clipped,
             safe_action=result.action,
             result=result,
             system=system,
@@ -239,28 +260,63 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
     def _projection_record(
         self,
         *,
-        raw_action: Any,
+        raw_action: Any | None = None,
+        actor_latent_phys: Any | None = None,
+        box_clipped_phys: Any | None = None,
         safe_action: Any,
         result: Optional[NumpyProjection2D],
         system: dict[str, Any],
         cbf_applied: bool,
     ) -> dict[str, Any]:
-        raw = np.asarray(raw_action, dtype=np.float32).reshape(-1)[:2]
+        latent_source = actor_latent_phys if actor_latent_phys is not None else raw_action
+        if latent_source is None:
+            raise ValueError("projection records require actor_latent_phys")
+        latent = np.asarray(latent_source, dtype=np.float32).reshape(-1)[:2]
         safe = np.asarray(safe_action, dtype=np.float32).reshape(-1)[:2]
+        box = (
+            np.clip(latent, self.physical_low, self.physical_high)
+            if box_clipped_phys is None
+            else np.asarray(box_clipped_phys, dtype=np.float32).reshape(-1)[:2]
+        )
+        box = np.clip(box, self.physical_low, self.physical_high).astype(np.float32)
         rows = np.asarray(system["rows"], dtype=np.float32).reshape(-1, 2)
         bounds = np.asarray(system["bounds"], dtype=np.float32).reshape(-1)
-        raw_max_violation = (
-            float(np.max(rows @ raw - bounds)) if rows.shape[0] else 0.0
+        cbf_rows = np.asarray(system.get("cbf_rows", ()), dtype=np.float32).reshape(-1, 2)
+        cbf_bounds = np.asarray(system.get("cbf_bounds", ()), dtype=np.float32).reshape(-1)
+
+        def _max_violation(action: np.ndarray, constraint_rows: np.ndarray, constraint_bounds: np.ndarray) -> float:
+            return (
+                float(np.max(constraint_rows @ action - constraint_bounds))
+                if constraint_rows.shape[0]
+                else 0.0
+            )
+
+        raw_max_violation = _max_violation(latent, rows, bounds)
+        box_max_violation = _max_violation(box, rows, bounds)
+        raw_cbf_violation = _max_violation(latent, cbf_rows, cbf_bounds)
+        box_cbf_violation = _max_violation(box, cbf_rows, cbf_bounds)
+        correction_normalized = normalized_action_delta_norm(
+            safe, box, self.physical_low, self.physical_high
         )
-        half_range = np.maximum(0.5 * (self.physical_high - self.physical_low), 1e-6)
-        correction_normalized = float(np.linalg.norm((safe - raw) / half_range))
+        actuator_clip_norm = unbounded_action_clip_norm(
+            latent, box, self.physical_low, self.physical_high
+        )
         intervened = bool(cbf_applied and correction_normalized > self.correction_epsilon)
         return {
-            "raw_action": raw.copy(),
+            # Canonical action-stage names.  The historical raw/safe aliases
+            # below remain for older result readers.
+            "actor_latent_phys": latent.copy(),
+            "box_clipped_phys": box.copy(),
+            "cbf_safe_phys": safe.copy(),
+            "executed_phys": safe.copy(),
+            "simulator_action_normalized": np.zeros(2, dtype=np.float32),
+            "raw_action": latent.copy(),
             "safe_action": safe.copy(),
             "cbf_applied": bool(cbf_applied),
-            "correction_norm_physical": float(np.linalg.norm(safe - raw)),
+            "actuator_clip_norm": actuator_clip_norm,
+            "correction_norm_physical": float(np.linalg.norm(safe - box)),
             "correction_norm_normalized": correction_normalized,
+            "cbf_correction_norm_normalized": correction_normalized,
             "intervened": intervened,
             "feasible": bool(True if result is None else result.feasible),
             "fallback_used": bool(False if result is None else result.fallback_used),
@@ -269,7 +325,13 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 0.0 if result is None else float(result.max_violation)
             ),
             "max_constraint_violation_raw": raw_max_violation,
+            "max_constraint_violation_box": box_max_violation,
+            "max_cbf_constraint_violation_raw": raw_cbf_violation,
+            "max_cbf_constraint_violation_box": box_cbf_violation,
             "raw_feasible": bool(raw_max_violation <= 1e-6),
+            "box_clipped_feasible": bool(box_max_violation <= 1e-6),
+            "raw_cbf_feasible": bool(raw_cbf_violation <= 1e-6),
+            "box_clipped_cbf_feasible": bool(box_cbf_violation <= 1e-6),
             "active_indices": (
                 np.zeros(0, dtype=np.int64)
                 if result is None
@@ -332,15 +394,20 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         # policy-rate experiment leaves that callback disabled, so its hard
         # CBF projection is evaluated once per policy action instead.
         system = self._constraint_system()
+        actor_latent = np.asarray(raw_action, dtype=np.float32).reshape(-1)[:2]
+        box_clipped = np.clip(
+            actor_latent, self.physical_low, self.physical_high
+        ).astype(np.float32)
         result = project_polytope_2d_numpy(
-            raw_action,
+            box_clipped,
             system["rows"],
             system["bounds"],
             action_low=self.physical_low,
             action_high=self.physical_high,
         )
         record = self._projection_record(
-            raw_action=raw_action,
+            actor_latent_phys=actor_latent,
+            box_clipped_phys=box_clipped,
             safe_action=result.action,
             result=result,
             system=system,
@@ -452,6 +519,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         aggregate["correction_norm_normalized"] = float(
             np.sqrt(np.mean(normalized**2)) if normalized.size else 0.0
         )
+        aggregate["cbf_correction_norm_normalized"] = aggregate[
+            "correction_norm_normalized"
+        ]
         aggregate["correction_norm_physical"] = float(
             np.sqrt(np.mean(physical**2)) if physical.size else 0.0
         )
@@ -494,6 +564,8 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         # but expose the last actually executed substep action and state.
         last = substeps[-1]
         aggregate["safe_action"] = np.asarray(last["safe_action"], dtype=np.float32)
+        aggregate["cbf_safe_phys"] = aggregate["safe_action"].copy()
+        aggregate["executed_phys"] = aggregate["safe_action"].copy()
         aggregate["active_indices"] = np.asarray(
             last.get("active_indices", ()), dtype=np.int64
         )
@@ -516,6 +588,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         raw_action: Any,
         safe_action: Any,
         *,
+        box_clipped_phys: Any | None = None,
         feasible: bool,
         fallback_used: bool,
         projection_source: str,
@@ -544,7 +617,8 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             max_violation=float(max_constraint_violation_safe),
         )
         self._pending_projection = self._projection_record(
-            raw_action=raw,
+            actor_latent_phys=raw,
+            box_clipped_phys=box_clipped_phys,
             safe_action=safe,
             result=result,
             system=system,
@@ -590,7 +664,8 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         raw = np.asarray(action, dtype=np.float32).reshape(-1)[:2]
         safe = np.clip(raw, self.physical_low, self.physical_high).astype(np.float32)
         return self._projection_record(
-            raw_action=raw,
+            actor_latent_phys=raw,
+            box_clipped_phys=safe,
             safe_action=safe,
             result=None,
             system=system,
@@ -612,12 +687,12 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             safe_action = record["safe_action"]
 
         # The direct HOCBF reward is intentionally evaluated once at the
-        # policy/CBF rate.  It uses the raw physical policy action after only
+        # policy/CBF rate.  It uses the box-clipped physical actor action after only
         # actuator-box clipping; no CBF projection is included in this term.
         # Thus a treatment run can be compared with raw nominal PPO without
         # silently changing the action that reaches the simulator.
         hocbf_reward_action = np.clip(
-            np.asarray(record["raw_action"], dtype=np.float32).reshape(-1)[:2],
+            np.asarray(record["box_clipped_phys"], dtype=np.float32).reshape(-1)[:2],
             self.physical_low,
             self.physical_high,
         )
@@ -636,12 +711,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             if use_substep_filter
             else safe_action
         )
-        normalized_action = np.asarray(
-            self.namespace["_physical_to_normalized_action"](
-                self, simulator_action
-            ),
-            dtype=np.float32,
-        ).reshape(-1)[:2]
+        normalized_action = physical_to_normalized_action(
+            simulator_action, self.physical_low, self.physical_high
+        )
         substep_records: list[dict[str, Any]] = []
         base = self.namespace["_lane_free_base"](self)
         previous_filter = None
@@ -667,13 +739,21 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 base.set_ego_substep_action_filter(previous_filter)
 
         record = self._aggregate_substep_record(record, substep_records)
-        executed_action = np.asarray(record["safe_action"], dtype=np.float32)
-        executed_normalized_action = np.asarray(
-            self.namespace["_physical_to_normalized_action"](
-                self, executed_action
-            ),
-            dtype=np.float32,
-        ).reshape(-1)[:2]
+        configured_execution = np.asarray(record["safe_action"], dtype=np.float32)
+        accelerations = np.asarray(
+            getattr(base, "_last_accelerations", np.empty((0, 2))), dtype=np.float32
+        )
+        if accelerations.ndim == 2 and accelerations.shape[0] > 0:
+            executed_action = accelerations[0, :2].copy()
+            execution_source = "simulator_last_acceleration"
+        else:
+            executed_action = configured_execution.copy()
+            execution_source = "cbf_safe_fallback"
+        record["executed_phys"] = executed_action.copy()
+        executed_normalized_action = physical_to_normalized_action(
+            executed_action, self.physical_low, self.physical_high
+        )
+        record["executed_normalized"] = executed_normalized_action.copy()
         if self._previous_executed_action_normalized is None:
             action_delta_norm_sq = 0.0
         else:
@@ -693,21 +773,41 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             - float(action_rate_penalty)
             - float(hocbf_reward_penalty)
         )
+        previous_executed_normalized = (
+            np.zeros(2, dtype=np.float32)
+            if self._previous_executed_action_normalized is None
+            else self._previous_executed_action_normalized.copy()
+        )
         self._previous_executed_action_normalized = executed_normalized_action.copy()
         info = dict(info)
-        raw = np.asarray(record["raw_action"], dtype=np.float32)
-        safe = np.asarray(record["safe_action"], dtype=np.float32)
+        latent = np.asarray(record["actor_latent_phys"], dtype=np.float32)
+        box = np.asarray(record["box_clipped_phys"], dtype=np.float32)
+        safe = np.asarray(record["cbf_safe_phys"], dtype=np.float32)
         record_system = record["system"]
         info.update(
             {
-                "latent_action_z_phys": raw.copy(),
-                "raw_action_phys": raw.copy(),
+                "simulator_action_normalized": normalized_action.copy(),
+                "actor_latent_phys": latent.copy(),
+                # The actor mean is available from the policy action-stages
+                # API. Do not publish a misleading None value when this
+                # lower-level wrapper receives only a sampled action.
+                "box_clipped_phys": box.copy(),
+                "cbf_safe_phys": safe.copy(),
+                "executed_phys": executed_action.copy(),
+                "previous_executed_normalized": previous_executed_normalized.copy(),
+                "simulator_execution_source": execution_source,
+                "simulator_action_matches_cbf_safe": bool(
+                    np.allclose(executed_action, safe, atol=1e-5)
+                ),
+                "latent_action_z_phys": latent.copy(),
+                "raw_action_phys": latent.copy(),
                 "safe_action_phys": safe.copy(),
+                "actuator_clip_norm": float(record["actuator_clip_norm"]),
                 "intervention": bool(record["intervened"]),
                 "cbf_event_intervened": bool(record["intervened"]),
                 "cbf_event_intervention_threshold": float(self.correction_epsilon),
-                "cbf_a_rl_x": float(raw[0]),
-                "cbf_a_rl_y": float(raw[1]),
+                "cbf_a_rl_x": float(latent[0]),
+                "cbf_a_rl_y": float(latent[1]),
                 "cbf_a_safe_x": float(safe[0]),
                 "cbf_a_safe_y": float(safe[1]),
                 "cbf_correction_norm": float(record["correction_norm_physical"]),
@@ -716,6 +816,13 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 ),
                 "cbf_intervened": bool(record["intervened"]),
                 "cbf_raw_feasible": bool(record["raw_feasible"]),
+                "cbf_box_clipped_feasible": bool(
+                    record["box_clipped_feasible"]
+                ),
+                "cbf_raw_cbf_feasible": bool(record["raw_cbf_feasible"]),
+                "cbf_box_clipped_cbf_feasible": bool(
+                    record["box_clipped_cbf_feasible"]
+                ),
                 "cbf_qp_success": bool(record["feasible"]),
                 "cbf_fallback_used": bool(record["fallback_used"]),
                 "cbf_projection_solver": "active_set_2d_shared",
@@ -775,6 +882,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                 ),
                 "cbf_max_constraint_violation_raw": float(
                     record["max_constraint_violation_raw"]
+                ),
+                "cbf_max_constraint_violation_box": float(
+                    record["max_constraint_violation_box"]
                 ),
                 "cbf_constraint_hash": str(record["constraint_hash"]),
                 "cbf_constraint_count": int(record_system["rows"].shape[0]),

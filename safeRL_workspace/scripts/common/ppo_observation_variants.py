@@ -7,6 +7,8 @@ from typing import Any, Optional
 import gymnasium as gym
 import numpy as np
 
+from scripts.common.action_units import physical_action_bounds_from_config, physical_to_normalized_action
+
 
 def install_previous_action_observation(namespace: dict[str, Any]) -> None:
     """Append the previous normalized executed ego command to the y-target state."""
@@ -68,22 +70,8 @@ def install_previous_action_observation(namespace: dict[str, Any]) -> None:
                     1.0,
                 )
             physical = accelerations[0, :2]
-            bounds = self.base_env.config["bounds"]
-            pairs = (
-                (float(bounds["ax_min"]), float(bounds["ax_max"])),
-                (float(bounds["ay_min"]), float(bounds["ay_max"])),
-            )
-            normalized = np.empty(2, dtype=np.float32)
-            for index, (value, (low, high)) in enumerate(zip(physical, pairs)):
-                clipped = float(np.clip(value, low, high))
-                if low < 0.0 < high:
-                    scale = high if clipped >= 0.0 else abs(low)
-                    normalized[index] = clipped / max(scale, 1e-6)
-                else:
-                    normalized[index] = float(
-                        2.0 * (clipped - low) / max(high - low, 1e-6) - 1.0
-                    )
-            return np.clip(normalized, -1.0, 1.0)
+            low, high = physical_action_bounds_from_config(self.base_env.config)
+            return physical_to_normalized_action(physical, low, high)
 
         def step(self, action):
             observation, reward, terminated, truncated, info = super().step(action)
@@ -93,6 +81,7 @@ def install_previous_action_observation(namespace: dict[str, Any]) -> None:
             info = dict(info)
             info.update(
                 {
+                    "previous_executed_normalized": previous_action.copy(),
                     "observation_at1_ax": float(previous_action[0]),
                     "observation_at1_ay": float(previous_action[1]),
                     "observation_at1_norm": float(np.linalg.norm(previous_action)),

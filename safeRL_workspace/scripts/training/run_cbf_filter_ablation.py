@@ -54,6 +54,12 @@ from scripts.training.cbf_lambda_event_bc_pilot_sweep import (
     find_project_root,
     set_stable_native_defaults,
 )
+from scripts.common.action_units import (
+    normalized_action_delta_norm,
+    physical_to_normalized_action,
+    unbounded_action_clip_norm,
+    validate_matching_physical_action_bounds,
+)
 from scripts.common.guided_cbf_minimal import GuidedCBFDDPG, install_minimal_guided_cbf
 from scripts.common.laneless_script_config import active_traffic_model, add_env_config_args, env_config_from_args
 from scripts.training.train_safety_potential_variants import MTM_CONGESTED_UNCERTAIN_UPDATES, deep_update
@@ -1111,21 +1117,32 @@ def box_scaled_delta_norm(
     low: np.ndarray,
     high: np.ndarray,
 ) -> float:
-    """Measure a physical correction on an affine actor/filter box scale."""
+    """Measure only the CBF correction, after actuator-box clipping."""
 
-    half_range = np.maximum(
-        0.5
-        * (
-            np.asarray(high, dtype=np.float32).reshape(-1)[:2]
-            - np.asarray(low, dtype=np.float32).reshape(-1)[:2]
-        ),
-        1e-6,
+    low = np.asarray(low, dtype=np.float32).reshape(-1)[:2]
+    high = np.asarray(high, dtype=np.float32).reshape(-1)[:2]
+    box_phys = np.clip(
+        np.asarray(raw_phys, dtype=np.float32).reshape(-1)[:2], low, high
     )
-    delta = (
-        np.asarray(safe_phys, dtype=np.float32).reshape(-1)[:2]
-        - np.asarray(raw_phys, dtype=np.float32).reshape(-1)[:2]
+    return normalized_action_delta_norm(safe_phys, box_phys, low, high)
+
+
+def _apply_legacy_observation_normalizer(
+    namespace: dict[str, Any], env: gym.Env
+) -> gym.Env:
+    """Keep the old scaler away from the canonical 30D/32D PPO schema."""
+
+    if not namespace.get("NORMALIZE_RL_OBSERVATIONS", False):
+        return env
+    observation_dim = int(np.prod(env.observation_space.shape))
+    if observation_dim in {30, 32}:
+        raise ValueError(
+            "LaneFreeObservationNormalizationWrapper is legacy-only and "
+            f"cannot process the canonical {observation_dim}D PPO observation"
+        )
+    return namespace["LaneFreeObservationNormalizationWrapper"](
+        env, clip=namespace["OBSERVATION_CLIP"]
     )
-    return float(np.linalg.norm(delta / half_range))
 
 
 def model_action_to_physical(model: Any, action: np.ndarray, env_config: dict[str, Any]) -> np.ndarray:
@@ -1192,6 +1209,11 @@ def install_correction_reward_env(namespace: dict[str, Any]) -> None:
         ) -> None:
             kwargs["lambda_filter"] = 0.0
             super().__init__(*args, **kwargs)
+            validate_matching_physical_action_bounds(
+                [self.ax_bounds[0], self.ay_bounds[0]],
+                [self.ax_bounds[1], self.ay_bounds[1]],
+                self.unwrapped.config,
+            )
             self.lambda_delta = float(lambda_delta)
             self.lambda_intervention = float(lambda_intervention)
             self.correction_epsilon = float(correction_epsilon)
@@ -1208,16 +1230,44 @@ def install_correction_reward_env(namespace: dict[str, Any]) -> None:
             )
             low = np.asarray([self.ax_bounds[0], self.ay_bounds[0]], dtype=np.float32)
             high = np.asarray([self.ax_bounds[1], self.ay_bounds[1]], dtype=np.float32)
-            half_range = np.maximum(0.5 * (high - low), 1e-6)
-            correction_norm_normalized = float(np.linalg.norm((safe_action - raw_action) / half_range))
+            box_action = np.clip(raw_action, low, high).astype(np.float32)
+            correction_norm_normalized = normalized_action_delta_norm(
+                safe_action, box_action, low, high
+            )
+            actuator_clip_norm = unbounded_action_clip_norm(
+                raw_action, box_action, low, high
+            )
             event_intervened = bool(correction_norm_normalized > self.correction_epsilon)
             correction_reward = -(
                 self.lambda_delta * correction_norm_normalized**2
                 + self.lambda_intervention * float(event_intervened)
             )
             reward = float(reward) + correction_reward
+            accelerations = np.asarray(
+                getattr(self.unwrapped, "_last_accelerations", np.empty((0, 2))),
+                dtype=np.float32,
+            )
+            if accelerations.ndim == 2 and accelerations.shape[0] > 0:
+                executed_action = accelerations[0, :2].copy()
+                execution_source = "simulator_last_acceleration"
+            else:
+                executed_action = safe_action.copy()
+                execution_source = "cbf_safe_fallback"
+            executed_normalized = physical_to_normalized_action(
+                executed_action, low, high
+            )
             info.update(
                 {
+                    "actor_latent_phys": raw_action,
+                    "box_clipped_phys": box_action,
+                    "cbf_safe_phys": safe_action,
+                    "executed_phys": executed_action,
+                    "simulator_action_normalized": executed_normalized,
+                    "simulator_execution_source": execution_source,
+                    "simulator_action_matches_cbf_safe": bool(
+                        np.allclose(executed_action, safe_action, atol=1e-5)
+                    ),
+                    "actuator_clip_norm": actuator_clip_norm,
                     "raw_action_phys": raw_action,
                     "safe_action_phys": safe_action,
                     "intervention": event_intervened,
@@ -1244,8 +1294,7 @@ def make_raw_env(
 ) -> gym.Env:
     env = gym.make("lane-free-v0", render_mode=None, config=copy.deepcopy(env_config))
     env = namespace["KaralakouRewardWrapper"](env, reward_config=copy.deepcopy(reward_config))
-    if namespace.get("NORMALIZE_RL_OBSERVATIONS", False):
-        env = namespace["LaneFreeObservationNormalizationWrapper"](env, clip=namespace["OBSERVATION_CLIP"])
+    env = _apply_legacy_observation_normalizer(namespace, env)
     if "KPIInfoWrapper" in namespace:
         env = namespace["KPIInfoWrapper"](env)
     return env
@@ -1276,8 +1325,7 @@ def make_cbf_env(
         k1=float(k1),
         psi1_gain=float(namespace.get("CBF_PSI1_GAIN", 2.3)),
     )
-    if namespace.get("NORMALIZE_RL_OBSERVATIONS", False):
-        env = namespace["LaneFreeObservationNormalizationWrapper"](env, clip=namespace["OBSERVATION_CLIP"])
+    env = _apply_legacy_observation_normalizer(namespace, env)
     if "KPIInfoWrapper" in namespace:
         env = namespace["KPIInfoWrapper"](env, intervention_threshold=float(correction_epsilon))
     return env
