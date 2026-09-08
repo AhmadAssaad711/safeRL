@@ -88,7 +88,10 @@ def run_benchmark(
         "terminate_on_collision": False,
         "simulation_frequency": int(simulation_frequency),
         "policy_frequency": int(policy_frequency),
-        "traffic_safety": {"dynamics_guard": bool(guard)},
+        "traffic_safety": {
+            "dynamics_guard": bool(guard),
+            "guard_ego_interactions": False,
+        },
     }
     env = environment_class(config=config)
     actions = np.random.default_rng(int(seed)).uniform(
@@ -175,7 +178,10 @@ def run_parallel_benchmark(
         "terminate_on_collision": False,
         "simulation_frequency": int(simulation_frequency),
         "policy_frequency": int(policy_frequency),
-        "traffic_safety": {"dynamics_guard": bool(guard)},
+        "traffic_safety": {
+            "dynamics_guard": bool(guard),
+            "guard_ego_interactions": False,
+        },
     }
     root_text = str(Path(project_root).resolve())
     env_fns = [

@@ -37,6 +37,8 @@ def test_new_research_configuration_centralizes_canonical_contract():
     assert resolved["simulation_frequency"] == 100
     assert resolved["policy_frequency"] == 20
     assert resolved["cbf_frequency"] == 20
+    assert resolved["traffic_safety"]["dynamics_guard"] is True
+    assert resolved["traffic_safety"]["guard_ego_interactions"] is False
     assert resolved["bounds"] == {
         "ax_min": -3.0,
         "ax_max": 3.0,

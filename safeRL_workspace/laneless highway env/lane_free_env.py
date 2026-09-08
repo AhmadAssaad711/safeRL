@@ -413,8 +413,11 @@ class LaneFreeTrafficEnv(AbstractEnv):
                     "spawn_cbf_psi_margin": 0.0,
                     # The guard controls surrounding traffic only. It never
                     # overwrites the controlled ego action, so an unsafe ego
-                    # action can still cause a meaningful collision.
+                    # action can still cause a meaningful collision. By
+                    # default it guards social-social pairs only; set
+                    # guard_ego_interactions=True to opt into ego interactions.
                     "dynamics_guard": True,
+                    "guard_ego_interactions": False,
                     "guard_horizon_s": 1.5,
                     "guard_range_m": 120.0,
                     "guard_longitudinal_clearance": 1.5,
@@ -1713,19 +1716,23 @@ class LaneFreeTrafficEnv(AbstractEnv):
     def _apply_traffic_safety_guard(
         self, accelerations: np.ndarray, dt: float
     ) -> np.ndarray:
-        """Keep social traffic from creating an unavoidable ego conflict.
+        """Keep social traffic from creating avoidable traffic conflicts.
 
         The controlled ego acceleration is deliberately immutable here.  The
-        guard asks surrounding vehicles to brake or yield laterally whenever
-        their proposed motion would consume the ego's emergency-braking
-        envelope, and applies the same rear-end rule to traffic-traffic pairs.
-        This is a simulator traffic rule, not a hidden ego safety filter.
+        default social-social guard asks surrounding vehicles to brake or yield
+        laterally when their proposed motion would create a traffic conflict.
+        With ``guard_ego_interactions=True``, it also applies those rules to
+        social traffic reacting to the controlled ego. This is a simulator
+        traffic rule, not a hidden ego safety filter.
         """
 
         safety = self._traffic_safety_config()
         guarded = np.asarray(accelerations, dtype=float).copy()
         diagnostics = {
             "enabled": float(bool(safety.get("dynamics_guard", True))),
+            "ego_interactions_enabled": float(
+                bool(safety.get("guard_ego_interactions", False))
+            ),
             "constraints": 0.0,
             "traffic_brakes": 0.0,
             "ego_leader_yields": 0.0,
@@ -1810,6 +1817,9 @@ class LaneFreeTrafficEnv(AbstractEnv):
         needs_guard = valid_pair & lateral_conflict & (
             longitudinal_gap < required_gap
         )
+        if not bool(safety.get("guard_ego_interactions", False)):
+            ego_pair = controlled[:, None] | controlled[None, :]
+            needs_guard &= ~ego_pair
         diagnostics["constraints"] = float(np.count_nonzero(needs_guard))
 
         # Social followers brake for either social traffic or the ego ahead.
@@ -2059,6 +2069,8 @@ class LaneFreeTrafficEnv(AbstractEnv):
 
         first_controlled = controlled[first_indices]
         second_controlled = controlled[second_indices]
+        if not bool(safety.get("guard_ego_interactions", False)):
+            candidate_mask &= ~(first_controlled | second_controlled)
         both_controlled = first_controlled & second_controlled
         infeasible += int(np.count_nonzero(candidate_mask & both_controlled))
         candidate_mask &= ~both_controlled
@@ -2382,6 +2394,12 @@ class LaneFreeTrafficEnv(AbstractEnv):
             {
                 "traffic_safe_spawn": bool(spawn.get("safe_spawn", 0.0)),
                 "traffic_spawn_rejections": int(spawn.get("rejections", 0.0)),
+                "traffic_guard_enabled": bool(
+                    traffic_safety.get("enabled", True)
+                ),
+                "traffic_guard_ego_interactions_enabled": bool(
+                    traffic_safety.get("ego_interactions_enabled", False)
+                ),
                 "traffic_guard_constraints": int(
                     traffic_safety.get("constraints", 0.0)
                 ),

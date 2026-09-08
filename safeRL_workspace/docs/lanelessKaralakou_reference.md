@@ -26,6 +26,14 @@ The study deliberately separates what the policy learns from what the runtime
 filter supplies. A CBF-OFF result measures the policy action map. A CBF-ON
 result measures that policy plus the deployed shield.
 
+The simulator-side traffic dynamics guard is separate from the ego CBF. By
+default it guards social-social pairs only, changing only social traffic
+actions. Setting `traffic_safety.guard_ego_interactions` to true explicitly
+opts into social-ego guard reactions; it never overwrites the controlled ego
+action. The default therefore leaves the ego's traffic interactions as a
+challenge for the ego policy and deployed CBF, while the MTM controller
+remains otherwise unchanged.
+
 ## Canonical experiment contract
 
 | Item | Canonical value | Meaning |

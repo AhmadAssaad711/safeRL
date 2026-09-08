@@ -96,6 +96,8 @@ class EnvironmentConfig:
     append_previous_executed_action: bool = True
     safe_spawn: bool = True
     spawn_cbf_safe_set: bool = True
+    dynamics_guard: bool = True
+    guard_ego_interactions: bool = False
     mtm_leader_range_m: float = 90.0
     mtm_profile_probabilities: tuple[tuple[str, float], ...] = (
         ("normal", 0.25),
@@ -279,6 +281,8 @@ class LanelessResearchConfig:
             "traffic_safety": {
                 "safe_spawn": env.safe_spawn,
                 "spawn_cbf_safe_set": env.spawn_cbf_safe_set,
+                "dynamics_guard": env.dynamics_guard,
+                "guard_ego_interactions": env.guard_ego_interactions,
                 "spawn_cbf_eps_side": safety.eps_side,
                 "spawn_cbf_psi1_gain": safety.psi1_gain,
                 "spawn_cbf_k1": safety.psi1_gain,

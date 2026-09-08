@@ -24,7 +24,8 @@
     },
     "traffic_safety": {
       "safe_spawn": true,
-      "dynamics_guard": true
+      "dynamics_guard": true,
+      "guard_ego_interactions": false
     },
     "bounds": {
       "ax_min": -3.0,

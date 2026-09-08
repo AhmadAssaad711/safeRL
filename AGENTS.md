@@ -126,6 +126,10 @@ these assumptions from the current notebook and reference:
   steps; a collision prevents completion;
 - CBF-OFF measures the policy action map; CBF-ON measures policy plus deployed
   shielding;
+- the simulator traffic dynamics guard remains enabled for social-social pairs,
+  while `traffic_safety.guard_ego_interactions` defaults to `false`; social
+  traffic reacts to the controlled ego only when that option is explicitly set
+  to `true`;
 - for `ppo_hocbf_reward_raw`, an omitted `hocbf-psi-scale` is calibrated once
   from a deterministic unshielded rollout of a fixed `ppo_nominal` checkpoint
   and frozen across all HOCBF-reward seeds. Zero-action calibration is only

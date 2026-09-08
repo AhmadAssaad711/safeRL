@@ -105,6 +105,7 @@ def main() -> int:
     env_config.setdefault("mtm", {})["continuous_driver_aggressiveness"] = True
     env_config.setdefault("traffic_safety", {})["safe_spawn"] = True
     env_config["traffic_safety"]["dynamics_guard"] = True
+    env_config["traffic_safety"]["guard_ego_interactions"] = False
     env_config["ego_controlled"] = False
     env_config["terminate_on_collision"] = False
     env_config["real_time_rendering"] = True
@@ -127,6 +128,7 @@ def main() -> int:
                 "profile_probabilities": env_config["mtm"]["profile_probabilities"],
                 "safe_spawn": True,
                 "dynamics_guard": True,
+                "guard_ego_interactions": False,
             },
             indent=2,
         ),
