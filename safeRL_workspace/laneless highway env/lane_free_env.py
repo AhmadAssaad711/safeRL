@@ -17,11 +17,13 @@ from highway_env.road.road import Road, RoadNetwork
 
 LANE_FREE_ENV_ID = "lane-free-v0"
 
-# Fixed relative-position CBF ellipse.  These are not the physical simulator
-# body dimensions; they encode the requested 1.0 m longitudinal and 0.5 m
-# lateral clearances around the 3.6 m by 1.8 m reference vehicles.
-CBF_RELATIVE_ELLIPSE_A = 4.6
-CBF_RELATIVE_ELLIPSE_B = 2.3
+# Fixed CBF ellipse.  These are not the physical simulator body dimensions;
+# they are the minimum-area enclosing ellipse for the 3.6 m by 1.8 m
+# reference vehicle.
+CBF_REFERENCE_VEHICLE_LENGTH_M = 3.6
+CBF_REFERENCE_VEHICLE_WIDTH_M = 1.8
+CBF_RELATIVE_ELLIPSE_A = CBF_REFERENCE_VEHICLE_LENGTH_M / math.sqrt(2.0)
+CBF_RELATIVE_ELLIPSE_B = CBF_REFERENCE_VEHICLE_WIDTH_M / math.sqrt(2.0)
 # Critical-damping first-level gain: psi_1 = h_dot + lambda_1 h.
 # This is deliberately separate from HOCBF ``k1``: for the alternative
 # (k1, k0) = (4.6, 5.29), lambda_1 = sqrt(k0) = 2.3 while k1 remains the
@@ -337,6 +339,13 @@ class LaneFreeTrafficEnv(AbstractEnv):
                 "simulation_frequency": 100,
                 "policy_frequency": 20,
                 "cbf_frequency": 20,
+                "cbf_geometry": {
+                    "model": "minimum_area_enclosing_vehicle_ellipse",
+                    "reference_vehicle_length_m": CBF_REFERENCE_VEHICLE_LENGTH_M,
+                    "reference_vehicle_width_m": CBF_REFERENCE_VEHICLE_WIDTH_M,
+                    "relative_ellipse_a_m": CBF_RELATIVE_ELLIPSE_A,
+                    "relative_ellipse_b_m": CBF_RELATIVE_ELLIPSE_B,
+                },
                 "vehicles_count": 35,
                 "sensing_range": 80.0,
                 "episode_steps": 800,
@@ -943,8 +952,17 @@ class LaneFreeTrafficEnv(AbstractEnv):
                 - 0.5 * road_length
             )
             dy = float(second.y - first.y)
-            a = float(CBF_RELATIVE_ELLIPSE_A)
-            b = float(CBF_RELATIVE_ELLIPSE_B)
+            cbf_geometry = self.config.get("cbf_geometry", {})
+            a = float(
+                cbf_geometry.get(
+                    "relative_ellipse_a_m", CBF_RELATIVE_ELLIPSE_A
+                )
+            )
+            b = float(
+                cbf_geometry.get(
+                    "relative_ellipse_b_m", CBF_RELATIVE_ELLIPSE_B
+                )
+            )
             h_value = (dx / a) ** 2 + (dy / b) ** 2 - 1.0
             if h_value < float(safety.get("spawn_cbf_margin_m", 0.0)):
                 return False

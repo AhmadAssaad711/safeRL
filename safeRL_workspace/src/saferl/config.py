@@ -9,7 +9,17 @@ unchanged.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from typing import Any
+
+
+# Reference dimensions for the CBF footprint model.  The minimum-area ellipse
+# enclosing an axis-aligned rectangle has semi-axes equal to each rectangle
+# side divided by sqrt(2).
+REFERENCE_VEHICLE_LENGTH_M = 3.6
+REFERENCE_VEHICLE_WIDTH_M = 1.8
+MINIMUM_ENCLOSING_ELLIPSE_A_M = REFERENCE_VEHICLE_LENGTH_M / math.sqrt(2.0)
+MINIMUM_ENCLOSING_ELLIPSE_B_M = REFERENCE_VEHICLE_WIDTH_M / math.sqrt(2.0)
 
 
 @dataclass(frozen=True)
@@ -171,16 +181,22 @@ class RewardConfig:
 
 @dataclass(frozen=True)
 class SafetyConfig:
-    """Fixed HOCBF and physical safety constants."""
+    """Fixed HOCBF and CBF-footprint safety constants."""
 
     eps_side: float = 0.10
     k0: float = 5.29
     k1: float = 3.68
     psi1_gain: float = 2.30
-    relative_ellipse_a_m: float = 4.6
-    relative_ellipse_b_m: float = 2.3
+    relative_ellipse_a_m: float = MINIMUM_ENCLOSING_ELLIPSE_A_M
+    relative_ellipse_b_m: float = MINIMUM_ENCLOSING_ELLIPSE_B_M
     max_neighbor_constraints: int = 12
     neighbor_range_m: float = 90.0
+
+    def __post_init__(self) -> None:
+        if self.relative_ellipse_a_m <= 0.0 or self.relative_ellipse_b_m <= 0.0:
+            raise ValueError("CBF ellipse semi-axes must be positive")
+        if self.relative_ellipse_a_m < self.relative_ellipse_b_m:
+            raise ValueError("CBF ellipse semi-major axis must be at least the semi-minor axis")
 
 
 @dataclass(frozen=True)
@@ -250,6 +266,15 @@ class LanelessResearchConfig:
                 "ax_max": self.action.physical_high[0],
                 "ay_min": self.action.physical_low[1],
                 "ay_max": self.action.physical_high[1],
+            },
+            "cbf_geometry": {
+                "model": "minimum_area_enclosing_vehicle_ellipse",
+                "reference_vehicle_length_m": REFERENCE_VEHICLE_LENGTH_M,
+                "reference_vehicle_width_m": REFERENCE_VEHICLE_WIDTH_M,
+                "relative_ellipse_a_m": safety.relative_ellipse_a_m,
+                "relative_ellipse_b_m": safety.relative_ellipse_b_m,
+                "full_major_axis_m": 2.0 * safety.relative_ellipse_a_m,
+                "full_minor_axis_m": 2.0 * safety.relative_ellipse_b_m,
             },
             "traffic_safety": {
                 "safe_spawn": env.safe_spawn,

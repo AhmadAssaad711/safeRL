@@ -1,8 +1,8 @@
 """Vectorized relative-position HOCBF geometry.
 
-The pairwise safety set is a fixed, axis-aligned relative-position ellipse.
-For the requested 3.6 m by 1.8 m vehicles and the specified clearances, its
-semi-axes are 4.6 m longitudinally and 2.3 m laterally.  This module keeps
+The pairwise safety set is a fixed, axis-aligned ellipse using the
+minimum-area enclosing ellipse for the 3.6 m by 1.8 m reference vehicle.
+Its semi-axes are ``3.6 / sqrt(2)`` and ``1.8 / sqrt(2)``.  This module keeps
 the shared batch implementation independent of notebook state so spawned
 workers and direct notebook execution use the same barrier and derivatives.
 """
@@ -14,10 +14,14 @@ from typing import Any, Optional
 import numpy as np
 
 
-# These are relative-position semi-axes, not the physical dimensions of the
-# simulator bodies.  The corresponding full axes are 9.2 m and 4.6 m.
-CBF_RELATIVE_ELLIPSE_A = 4.6
-CBF_RELATIVE_ELLIPSE_B = 2.3
+# These are CBF semi-axes, not the physical dimensions of the simulator
+# bodies.  They are the minimum-area enclosing ellipse for the configured
+# 3.6 m by 1.8 m reference vehicle.  The corresponding full axes are
+# approximately 5.0912 m and 2.5456 m.
+CBF_REFERENCE_VEHICLE_LENGTH_M = 3.6
+CBF_REFERENCE_VEHICLE_WIDTH_M = 1.8
+CBF_RELATIVE_ELLIPSE_A = CBF_REFERENCE_VEHICLE_LENGTH_M / np.sqrt(2.0)
+CBF_RELATIVE_ELLIPSE_B = CBF_REFERENCE_VEHICLE_WIDTH_M / np.sqrt(2.0)
 
 
 def _wrapped_signed_dx(raw_dx: float, road_length: Optional[float]) -> float:

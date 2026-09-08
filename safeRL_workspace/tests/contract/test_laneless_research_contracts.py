@@ -30,6 +30,8 @@ def test_new_research_configuration_centralizes_canonical_contract():
     assert config.safety.eps_side == pytest.approx(0.10)
     assert config.safety.k0 == pytest.approx(5.29)
     assert config.safety.k1 == pytest.approx(3.68)
+    assert config.safety.relative_ellipse_a_m == pytest.approx(3.6 / np.sqrt(2.0))
+    assert config.safety.relative_ellipse_b_m == pytest.approx(1.8 / np.sqrt(2.0))
 
     resolved = config.resolved_environment_config()
     assert resolved["simulation_frequency"] == 100
@@ -40,6 +42,15 @@ def test_new_research_configuration_centralizes_canonical_contract():
         "ax_max": 3.0,
         "ay_min": -3.0,
         "ay_max": 3.0,
+    }
+    assert resolved["cbf_geometry"] == {
+        "model": "minimum_area_enclosing_vehicle_ellipse",
+        "reference_vehicle_length_m": 3.6,
+        "reference_vehicle_width_m": 1.8,
+        "relative_ellipse_a_m": pytest.approx(3.6 / np.sqrt(2.0)),
+        "relative_ellipse_b_m": pytest.approx(1.8 / np.sqrt(2.0)),
+        "full_major_axis_m": pytest.approx(2.0 * 3.6 / np.sqrt(2.0)),
+        "full_minor_axis_m": pytest.approx(2.0 * 1.8 / np.sqrt(2.0)),
     }
 
 
