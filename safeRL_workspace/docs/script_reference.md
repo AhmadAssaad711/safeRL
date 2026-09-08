@@ -367,9 +367,13 @@ This module contains the custom Stable-Baselines3-compatible PPO components.
   policy objective and the CBF guidance or projection path.
 - DetachedCBFActorPPO and ProjectedCBFPPO are the concrete PPO trainers.
 
-The projection is in physical action space. The policy still consumes and emits
-the normalized action-space representation defined by the notebook and wrapper
-configuration.
+The projection and CBF PPO actor are in physical action space. The actor stages
+are `actor_mean_phys`, `actor_latent_phys`, `box_clipped_phys`, and
+`cbf_safe_phys`; the environment converts the safe physical command to
+`simulator_action_normalized` before integration and reports `executed_phys`.
+`previous_executed_normalized` is the action-history feature. The legacy DDPG
+path may still use normalized actor actions, but that terminology must not be
+applied to the CBF PPO wrapper.
 
 ### run_ppo_cbf_progression.py
 
@@ -679,12 +683,15 @@ The following conventions are important when adding a new script:
 1. Keep environment configuration in laneless_script_config or an explicit
    notebook override. Do not copy a second default configuration into a new
    script.
-2. Keep physical and normalized actions named separately. Functions such as
-   normalized_to_physical, physical_to_normalized, model_action_to_physical,
-   and normalized_delta_norm exist to prevent accidental mixing.
-3. Keep raw, safe, and executed action stages as separate fields in diagnostic
-   output. A filter contribution study is not reproducible if those stages are
-   overwritten.
+2. Keep physical and normalized actions named separately. The shared
+   `common/action_units.py` transform is the authority for
+   `simulator_action_normalized`, `actor_latent_phys`, `box_clipped_phys`,
+   `cbf_safe_phys`, and `executed_phys`; complete-action correction norms use
+   the canonical inverse map, including asymmetric zero-crossing bounds.
+3. Keep `actor_mean_phys`, `actor_latent_phys`, `box_clipped_phys`,
+   `cbf_safe_phys`, and `executed_phys` as separate diagnostic fields. A
+   filter contribution study is not reproducible if actuator clipping and CBF
+   intervention are combined.
 4. Include seed, model variant, notebook source hash, CBF snapshot, environment
    configuration, and artifact paths in new result manifests.
 5. Use atomic publication for final JSON/CSV summaries and retain partial

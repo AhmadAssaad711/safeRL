@@ -88,20 +88,35 @@ per row, including vehicle dimensions. The notebook's C.1 preflight asserts
 the shape before training. This legacy interface is intentionally documented
 separately from the canonical 32D PPO interface.
 
-### Action path
+### Action path and units
 
-The policy outputs a normalized two-dimensional action. The environment
-adapter maps it to physical acceleration using the configured bounds. For a
-CBF-enabled run, the path is:
+The canonical CBF PPO wrapper exposes the actor a physical acceleration action
+space, so the runtime actor outputs physical m/s² values. The simulator still
+receives its own normalized action after the final inverse map. These stages
+must not be renamed interchangeably:
 
-    policy latent output
-        -> optional differentiable mean projection
-        -> sampled-action hard projection
-        -> one policy-rate HOCBF check
-        -> LaneFreeTrafficEnv integration
+| Stage | Units | Meaning |
+| --- | --- | --- |
+| `actor_mean_phys` | m/s² | Actor mean before sampling |
+| `actor_latent_phys` | m/s² | Unbounded Gaussian sample from the actor |
+| `box_clipped_phys` | m/s² | Actor sample clipped to the physical actuator box |
+| `cbf_safe_phys` | m/s² | CBF projection output, starting from `box_clipped_phys` |
+| `simulator_action_normalized` | normalized | Command sent to the simulator |
+| `executed_phys` | m/s² | Acceleration actually integrated by the simulator |
+| `previous_executed_normalized` | normalized | Previous executed command appended to PPO state |
 
-The raw policy command, safe command, applied command, correction, solver
-status, and fallback status are logged independently.
+The deployed path is therefore:
+
+    actor_mean_phys -> actor_latent_phys -> box_clipped_phys
+        -> cbf_safe_phys -> simulator_action_normalized -> executed_phys
+
+Actuator clipping is recorded as `actuator_clip_norm`. CBF intervention is
+recorded separately as the normalized difference between `cbf_safe_phys` and
+`box_clipped_phys`; actuator saturation is not counted as a CBF correction.
+For asymmetric zero-crossing bounds, complete physical actions are converted
+with the simulator's sign-dependent inverse map before normalized differences
+are computed. The legacy normalized-action DDPG interface remains documented
+separately and must not be used to describe the CBF PPO actor.
 
 ## Karalakou reward
 
@@ -270,7 +285,7 @@ scripts/evaluation/evaluate_laneless_karalakou.py:
 | Abs speed error (m/s) | mean_abs_speed_deviation |
 | Mean lateral tracking error (m) | mean_lat_y_error_m |
 | Intervention rate | event_intervention_rate |
-| Correction norm | mean_correction_norm |
+| CBF correction norm (normalized, after box clipping) | mean_correction_norm |
 | Mean jerk norm | mean_jerk_norm |
 
 The PPO post-training table adds Distance-based completion rate. A completed
