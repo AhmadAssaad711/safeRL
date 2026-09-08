@@ -191,26 +191,33 @@ does not infer a safe dry-run default from the prose alone.
 
 ## CBF geometry and filtering
 
-The pairwise CBF rows use a fixed, axis-aligned relative-position ellipse.
-For the requested identical 3.6 m by 1.8 m vehicles, with 1.0 m
-longitudinal clearance and 0.5 m lateral clearance, the semi-axes are:
+The pairwise CBF rows use a fixed, axis-aligned ellipse configured as the
+minimum-area enclosing ellipse for the `3.6 m x 1.8 m` reference vehicle. For
+an axis-aligned rectangle, the enclosing semi-axes are the side lengths
+divided by `sqrt(2)`:
 
-    A = 3.6 + 1.0 = 4.6 m
-    B = 1.8 + 0.5 = 2.3 m
+    A = 3.6 / sqrt(2) = 2.5455844123 m
+    B = 1.8 / sqrt(2) = 1.2727922061 m
 
 The barrier is:
 
-    h(dx, dy) = dx^2 / 4.6^2 + dy^2 / 2.3^2 - 1
+    h(dx, dy) = dx^2 / A^2 + dy^2 / B^2 - 1
 
-Thus `h >= 0` is the collision-free side of the relative-position ellipse;
-its full axis lengths are 9.2 m longitudinally and 4.6 m laterally. The
-relative coordinates are axis-aligned, so vehicle headings and per-vehicle
-dimensions do not alter this pairwise barrier. `eps_side` remains accepted
-for compatibility and provenance, but is not applied to this fixed geometry.
-The shared implementation uses the exact gradient and Hessian of this
-quadratic barrier. The simulator's existing physical body configuration is
-still `3.5 m x 1.8 m`; the requested `3.6 m x 1.8 m` values define this CBF
-relative geometry and do not change collision detection body sizes.
+Thus `h >= 0` is the collision-free side of the configured CBF ellipse; its
+full major and minor axis lengths are approximately `5.0911688245 m` and
+`2.5455844123 m`. The relative coordinates are axis-aligned, so vehicle
+headings and per-vehicle dimensions do not alter this pairwise barrier.
+`eps_side` remains accepted for compatibility and provenance, but is not
+applied to this fixed geometry. The shared implementation uses the exact
+gradient and Hessian of this quadratic barrier. The simulator's existing
+physical body configuration is still `3.5 m x 1.8 m`; the `3.6 m x 1.8 m`
+reference dimensions define the CBF geometry and do not change collision
+detection body sizes.
+
+The resolved source for these values is `SafetyConfig` in
+`src/saferl/config.py`, serialized under `cbf_geometry` in the environment
+configuration. The notebook and compatibility modules mirror that resolved
+contract for historical execution paths.
 
 For the critical-damping alternative `(k1, k0) = (4.6, 5.29)`, the two
 levels are:
