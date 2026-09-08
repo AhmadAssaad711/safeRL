@@ -1245,6 +1245,12 @@ def _base_environment(
         env, reward_config=copy.deepcopy(reward_config)
     )
     if namespace.get("NORMALIZE_RL_OBSERVATIONS", False):
+        observation_dim = int(np.prod(env.observation_space.shape))
+        if observation_dim in {30, 32}:
+            raise ValueError(
+                "The canonical PPO factory does not allow the legacy "
+                f"observation normalizer for {observation_dim}D observations"
+            )
         env = namespace["LaneFreeObservationNormalizationWrapper"](
             env, clip=namespace["OBSERVATION_CLIP"]
         )
