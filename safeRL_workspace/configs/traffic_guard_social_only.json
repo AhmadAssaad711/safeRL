@@ -1,0 +1,6 @@
+{
+  "traffic_safety": {
+    "dynamics_guard": true,
+    "guard_ego_interactions": false
+  }
+}

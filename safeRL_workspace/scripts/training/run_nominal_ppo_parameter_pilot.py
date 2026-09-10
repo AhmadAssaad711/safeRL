@@ -34,6 +34,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 import scripts.training.run_cbf_filter_ablation as pipeline
 import scripts.training.run_nominal_ddpg_parameter_pilot as pilot_common
 from scripts.common.laneless_script_config import (
+    DEFAULT_LANELESS_WORKERS,
     active_traffic_model,
     add_env_config_args,
     env_config_from_args,
@@ -52,6 +53,7 @@ DEFAULT_TIMESTEPS = 50_000
 DEFAULT_CHECKPOINT_INTERVAL = 10_000
 DEFAULT_EVAL_TIMESTEPS = 800
 DEFAULT_GLOBAL_ROLLOUT_SIZE = 1_000
+DEFAULT_PPO_WORKERS = DEFAULT_LANELESS_WORKERS
 
 
 def validate_training_device(device: str) -> str:
@@ -91,8 +93,8 @@ def default_tensorboard_root() -> Path:
 def effective_ppo_config(pilot_config: str, args: argparse.Namespace) -> dict[str, Any]:
     """Keep each PPO rollout at a fixed global transition count.
 
-    Eight workers with ``n_steps=125`` still collect 1,000 transitions per
-    PPO update, matching the original one-worker ``n_steps=1000`` protocol.
+    Twenty workers with ``n_steps=50`` still collect 1,000 transitions per PPO
+    update, matching the original one-worker ``n_steps=1000`` protocol.
     """
 
     config = copy.deepcopy(PPO_CONFIGS[pilot_config])
@@ -1082,17 +1084,19 @@ def ppo_config_payload(
         "shared_protocol_pipeline": project_root / "scripts" / "training" / "run_cbf_filter_ablation.py",
         "shared_nominal_pilot": project_root
         / "scripts"
+        / "training"
         / "run_nominal_ddpg_parameter_pilot.py",
         "script_config": project_root / "scripts" / "common" / "laneless_script_config.py",
         "mtm_training_config": project_root
         / "scripts"
+        / "training"
         / "train_safety_potential_variants.py",
         "notebook": project_root / "notebooks" / "lanelessKaralakou.ipynb",
         "environment": project_root / "laneless highway env" / "lane_free_env.py",
     }
     return {
         "schema_version": PPO_PILOT_SCHEMA_VERSION,
-        "study": "nominal_ppo_50k_parameter_pilot",
+        "study": "nominal_ppo_parameter_pilot",
         "pilot_config": pilot_config,
         "observation_variant": (
             "target_y_plus_previous_action"
@@ -1859,7 +1863,7 @@ def write_summaries(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the exact 50k nominal-PPO Q0--Q3 lane-free parameter pilot."
+        description="Run a nominal-PPO lane-free parameter pilot with no CBF deployment or reward term."
     )
     parser.add_argument("--stage", choices=("screen", "summarize"), default="screen")
     parser.add_argument("--project-root", type=Path, default=None)
@@ -1886,13 +1890,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-envs",
         type=int,
-        default=1,
-        help="number of training environments; use --use-subproc for true parallel workers",
+        default=DEFAULT_PPO_WORKERS,
+        help=(
+            "number of PPO rollout workers; the canonical default uses "
+            "20 Windows-safe subprocess workers"
+        ),
     )
     parser.add_argument(
         "--use-subproc",
-        action="store_true",
-        help="require SubprocVecEnv when --n-envs is greater than one",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use SubprocVecEnv for parallel PPO workers (enabled by default)",
     )
     parser.add_argument(
         "--global-rollout-size",
@@ -1975,8 +1983,8 @@ def _main_resolved(
     if unknown:
         raise ValueError(f"Unknown PPO pilot configurations: {unknown}")
     training_seeds = [int(seed) for seed in args.seeds]
-    if len(training_seeds) != 1 or len(set(training_seeds)) != 1:
-        raise ValueError("The quick PPO screening pilot requires one common training seed")
+    if not training_seeds or len(set(training_seeds)) != len(training_seeds):
+        raise ValueError("PPO training seeds must be non-empty and unique")
     if args.eval_seeds is None:
         args.eval_seeds = [
             int(args.eval_seed_start) + index for index in range(int(args.eval_scenarios))
@@ -2038,7 +2046,7 @@ def _main_resolved(
     output_dir.mkdir(parents=True, exist_ok=True)
     root_config = {
         "schema_version": PPO_PILOT_SCHEMA_VERSION,
-        "study": "nominal_ppo_50k_parameter_pilot",
+        "study": "nominal_ppo_parameter_pilot",
         "stage": "screen",
         "selected_configs": selected_configs,
         "training_seeds": training_seeds,
@@ -2093,7 +2101,7 @@ def _main_resolved(
     )
     print(
         "[ppo-pilot] starting"
-        f" configs={selected_configs} seed={training_seeds[0]}"
+        f" configs={selected_configs} seeds={training_seeds}"
         f" timesteps={target_timesteps:,} snapshots_every={checkpoint_interval:,}"
         f" evaluation={'every_snapshot' if bool(args.evaluate_checkpoints) else 'final_only'}"
         f" eval={len(args.eval_seeds)}x{args.eval_timesteps}"

@@ -16,6 +16,10 @@ from stable_baselines3.common.buffers import RolloutBuffer
 import scripts.training.run_nominal_ppo_parameter_pilot as pilot
 
 
+def test_canonical_ppo_worker_default_is_shared_and_parallel():
+    assert pilot.DEFAULT_PPO_WORKERS == 20
+
+
 def test_ppo_pilot_table_and_exact_boundaries():
     assert list(pilot.PPO_CONFIGS) == [
         "Q0_current_aligned",
@@ -394,7 +398,7 @@ def test_notebook_ppo_cell_delegates_to_canonical_cbf_progression():
         if cell.get("id") == "eb9eade5"
     )
     compile(source, f"{notebook_path}:ppo-cbf-progression", "exec")
-    assert "run_ppo_cbf_progression.py" in source
+    assert '"-m", "scripts.training.run_ppo_cbf_progression"' in source
     assert "PPO_1M_TIMESTEPS_PER_POLICY" in source
     assert "PPO_1M_RUN_TRAINING" in source
     assert "PPO_1M_FORCE_RETRAIN" in source

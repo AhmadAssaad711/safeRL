@@ -27,7 +27,11 @@ from scripts.common.laneless_evaluation_registry import (
     sync_metrics_to_requested_output,
     write_evaluation_manifest,
 )
-from scripts.common.laneless_script_config import active_traffic_model, env_config_from_args
+from scripts.common.laneless_script_config import (
+    DEFAULT_LANELESS_WORKERS,
+    active_traffic_model,
+    env_config_from_args,
+)
 
 
 TEN_KPI_SPECS: tuple[tuple[str, str], ...] = (
@@ -42,7 +46,7 @@ TEN_KPI_SPECS: tuple[tuple[str, str], ...] = (
     ("Correction norm", "mean_correction_norm"),
     ("Mean jerk norm", "mean_jerk_norm"),
 )
-DEFAULT_EVALUATION_WORKERS = 20
+DEFAULT_EVALUATION_WORKERS = DEFAULT_LANELESS_WORKERS
 
 
 def ten_kpi_summary(metrics: pd.DataFrame) -> pd.DataFrame:
@@ -319,7 +323,7 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=DEFAULT_EVALUATION_WORKERS,
-        help="independent single-threaded CPU evaluation workers",
+        help="independent single-threaded CPU evaluation workers (default: %(default)s)",
     )
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)

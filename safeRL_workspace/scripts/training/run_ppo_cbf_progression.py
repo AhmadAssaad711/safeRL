@@ -39,7 +39,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Iterable
 
-# Eight vectorized simulator workers already provide the intended CPU
+# Twenty vectorized simulator workers provide the canonical CPU
 # parallelism.  Set these before NumPy/PyTorch import so one BLAS/OpenMP pool
 # per worker cannot oversubscribe the machine and freeze the desktop during a
 # long CUDA-backed PPO run.
@@ -65,6 +65,7 @@ import scripts.training.run_cbf_filter_ablation as protocol
 from scripts.evaluation.evaluate_laneless_karalakou import TEN_KPI_SPECS
 from scripts.evaluation.evaluate_ppo_cbf_counterfactuals import run_counterfactual_analysis
 from scripts.common.laneless_script_config import (
+    DEFAULT_LANELESS_WORKERS,
     active_traffic_model,
     add_env_config_args,
     env_config_from_args,
@@ -95,13 +96,64 @@ DEFAULT_EVAL_SCENARIOS = 10
 DEFAULT_EVAL_TIMESTEPS = 800
 DEFAULT_POST_TRAIN_EVAL_EPISODES = 200
 DEFAULT_POST_TRAIN_EVAL_SEED_START = 1_100_000
-DEFAULT_POST_TRAIN_EVAL_WORKERS = 20
+DEFAULT_POST_TRAIN_EVAL_WORKERS = DEFAULT_LANELESS_WORKERS
 DEFAULT_TASK_DISTANCE_M = 1_000.0
 DEFAULT_TASK_MAX_POLICY_STEPS = 3_000
 POST_TRAIN_EVAL_SUMMARY_BLOCKS = 10
 DEFAULT_PPO_CONFIG = "Q0_current_aligned"
-# The notebook and direct CLI runs use a fixed 20-worker rollout pool.
-DEFAULT_NUM_ENVS = 20
+# The notebook and direct CLI runs use the shared worker default.
+DEFAULT_NUM_ENVS = DEFAULT_LANELESS_WORKERS
+
+
+def load_reward_config_file(
+    path: Path, *, allowed_keys: set[str]
+) -> dict[str, Any]:
+    """Load explicit scalar reward overrides without changing the notebook."""
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read reward config file {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Reward config file must contain a JSON object")
+    unknown = sorted(set(payload) - set(allowed_keys))
+    if unknown:
+        raise ValueError(
+            "Reward config file contains unknown keys: " + ", ".join(unknown)
+        )
+    overrides: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, bool):
+            overrides[str(key)] = value
+        elif isinstance(value, (int, float)):
+            if not np.isfinite(float(value)):
+                raise ValueError(
+                    f"Reward config value for {key!r} must be finite"
+                )
+            overrides[str(key)] = float(value)
+        elif isinstance(value, str):
+            overrides[str(key)] = value
+        else:
+            raise ValueError(
+                f"Reward config value for {key!r} must be a scalar JSON value"
+            )
+    return overrides
+
+
+def reward_config_source_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    """Return provenance for the optional external reward override file."""
+
+    path = getattr(args, "reward_config_file", None)
+    if path is None:
+        return {"path": None, "sha256": None, "overrides": {}}
+    resolved = Path(path).resolve()
+    return {
+        "path": str(resolved),
+        "sha256": protocol.file_sha256(resolved),
+        "overrides": copy.deepcopy(
+            getattr(args, "reward_config_file_overrides", {})
+        ),
+    }
 
 VARIANT_SPECS: dict[str, dict[str, Any]] = {
     "ppo_nominal": {
@@ -748,6 +800,8 @@ def _cbf_training_snapshot(namespace: dict[str, Any]) -> dict[str, Any]:
         "CBF_MAX_NEIGHBOR_CONSTRAINTS",
         "CBF_QP_FEASIBILITY_TOL",
         "CBF_TARGET_PAIR_DY",
+        "CBF_RELATIVE_ELLIPSE_A",
+        "CBF_RELATIVE_ELLIPSE_B",
     )
     return {
         key: namespace[key]
@@ -2054,6 +2108,7 @@ def train_variant(
             "than bit-exact trajectory replay"
         ),
         "env_config": env_config,
+        "reward_config_source": reward_config_source_metadata(args),
         "reward_config": reward_config,
         "elapsed_sec": float(time.perf_counter() - started),
     }
@@ -2807,8 +2862,8 @@ def _evaluate_complete_episode_rows(
             variant=progress_variant,
         )
 
-    # Keep direct/unit callers that predate the worker option on the safe
-    # serial path; the CLI and notebook both provide the global default of 20.
+    # Direct/unit callers that predate the worker option retain the serial test
+    # path; the CLI and notebook provide the global default of 20 workers.
     workers = int(getattr(args, "post_train_eval_workers", 1))
     if workers <= 1:
         model = load_model(variant, model_path, args.device)
@@ -2954,7 +3009,14 @@ def _write_episode_progress_snapshot(
     status_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = status_path.with_suffix(status_path.suffix + ".tmp")
     temporary.write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")
-    temporary.replace(status_path)
+    for attempt in range(8):
+        try:
+            temporary.replace(status_path)
+            break
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _print_episode_progress(
@@ -3716,6 +3778,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--project-root", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--reward-config-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON object of scalar reward overrides layered on the "
+            "notebook reward; the resolved file and hash are recorded."
+        ),
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--timesteps", type=int, default=DEFAULT_TIMESTEPS)
     parser.add_argument(
@@ -4180,7 +4251,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     protocol.set_stable_native_defaults()
     # The learner is CUDA-bound in the canonical notebook; limiting its host
-    # thread pools prevents competition with the eight CPU simulator workers.
+    # thread pools prevents competition with the twenty CPU simulator workers.
     # (``set_num_interop_threads`` can only be called once in a process.)
     try:
         th.set_num_threads(1)
@@ -4339,6 +4410,19 @@ def main() -> int:
     if not bool(env_config.get("terminate_on_collision", False)):
         raise RuntimeError("PPO progression requires terminate_on_collision=True")
     reward_config = protocol.make_base_reward_config(namespace)
+    reward_config_overrides: dict[str, Any] = {}
+    if args.reward_config_file is not None:
+        reward_config_path = (
+            args.reward_config_file
+            if args.reward_config_file.is_absolute()
+            else project_root / args.reward_config_file
+        ).resolve()
+        reward_config_overrides = load_reward_config_file(
+            reward_config_path, allowed_keys=set(reward_config)
+        )
+        reward_config.update(reward_config_overrides)
+        args.reward_config_file = reward_config_path
+    args.reward_config_file_overrides = reward_config_overrides
     if args.collision_penalty is not None:
         if not np.isfinite(float(args.collision_penalty)):
             raise ValueError("--collision-penalty must be finite")
@@ -4512,9 +4596,11 @@ def main() -> int:
             "timesteps": int(args.timesteps),
             "collision_penalty": float(reward_config["collision_penalty"]),
             "reward_mode": str(reward_config.get("reward_mode", "reciprocal")),
+            "speed_error_weight_wx": float(reward_config.get("wx", np.nan)),
             "progress_reward_weight": float(
                 reward_config["progress_reward_weight"]
             ),
+            "reward_config_source": reward_config_source_metadata(args),
             "overtake_bonus": float(reward_config["overtake_bonus"]),
             "collision_reward_override": bool(
                 reward_config.get("collision_reward_override", False)
@@ -4926,6 +5012,7 @@ def main() -> int:
             not args.skip_evaluation and not args.skip_counterfactual
         ),
         "env_config": env_config,
+        "reward_config_source": reward_config_source_metadata(args),
         "reward_config": reward_config,
     }
     (output_dir / "study_config.json").write_text(

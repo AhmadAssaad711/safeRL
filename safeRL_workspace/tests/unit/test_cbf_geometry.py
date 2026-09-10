@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -179,3 +180,45 @@ def test_fixed_relative_position_ellipse_axes_and_derivatives():
         rtol=0.0,
         atol=1e-12,
     )
+
+
+def test_notebook_kpi_geometry_matches_the_fixed_pairwise_barrier():
+    namespace = _notebook_namespace()
+    geometry_metadata = namespace["ENV_CONFIG"]["cbf_geometry"]
+    ellipse_a = 3.6 / np.sqrt(2.0)
+    ellipse_b = 1.8 / np.sqrt(2.0)
+    assert geometry_metadata == {
+        "model": "minimum_area_enclosing_vehicle_ellipse",
+        "reference_vehicle_length_m": 3.6,
+        "reference_vehicle_width_m": 1.8,
+        "relative_ellipse_a_m": ellipse_a,
+        "relative_ellipse_b_m": ellipse_b,
+        "full_major_axis_m": 2.0 * ellipse_a,
+        "full_minor_axis_m": 2.0 * ellipse_b,
+    }
+
+    ego = SimpleNamespace(
+        position=np.asarray([379.5, 5.0]), length=9.0, width=4.0, heading=1.2
+    )
+    neighbor = SimpleNamespace(
+        position=np.asarray([0.5, 5.5]), length=1.0, width=0.5, heading=-2.3
+    )
+    base = SimpleNamespace(
+        vehicle=ego,
+        road=SimpleNamespace(vehicles=[ego, neighbor]),
+        config={"sensing_range": 90.0, "road_width": 10.2},
+        _signed_distance=lambda start, end: ((end - start + 190.0) % 380.0) - 190.0,
+    )
+    metrics = namespace["kpi_neighbor_and_h_metrics"](
+        SimpleNamespace(unwrapped=base), eps_side=100.0
+    )
+
+    dx, dy = 1.0, 0.5
+    expected_h = (dx / ellipse_a) ** 2 + (dy / ellipse_b) ** 2 - 1.0
+    expected_radius = 1.0 / np.sqrt(
+        (np.cos(np.arctan2(dy, dx)) / ellipse_a) ** 2
+        + (np.sin(np.arctan2(dy, dx)) / ellipse_b) ** 2
+    )
+    np.testing.assert_allclose(metrics["kpi_pairwise_h_min"], expected_h)
+    np.testing.assert_allclose(metrics["kpi_h_min"], expected_h)
+    np.testing.assert_allclose(metrics["kpi_min_required_distance_m"], expected_radius)

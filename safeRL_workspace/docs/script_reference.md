@@ -209,6 +209,9 @@ than benchmark evaluation.
 
 These functions provide one configuration path for scripts:
 
+- `DEFAULT_LANELESS_WORKERS` is the shared 20-worker default for PPO rollout
+  and process-backed laneless evaluation entry points. Legacy DDPG runners
+  retain their explicit historical worker controls.
 - load_json_object reads a JSON object from a path or inline value.
 - deep_update applies nested, explicit overrides without discarding unrelated
   defaults.
@@ -406,6 +409,9 @@ This is the main multi-variant PPO experiment runner.
   `cbf_substep_filtering`/`cbf_frequency` combination.
 - build_model and load_model select or restore the PPO implementation.
 - train_variant runs one named formulation and writes progress.
+- `--reward-config-file` layers an explicit JSON object of scalar reward
+  overrides on the notebook reward without editing the notebook; the resolved
+  path, SHA-256, and applied overrides are written to each run/study manifest.
 - make_evaluation_env, evaluate_scenario, evaluate_completed_episode, and
   evaluate_post_training_model implement post-training evaluation.
 - _initialize_post_train_eval_worker, _evaluate_post_train_episode_worker,

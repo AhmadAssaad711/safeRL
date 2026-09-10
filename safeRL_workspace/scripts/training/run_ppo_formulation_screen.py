@@ -22,7 +22,11 @@ import pandas as pd
 
 import scripts.training.run_cbf_filter_ablation as pipeline
 import scripts.training.run_nominal_ppo_parameter_pilot as ppo_base
-from scripts.common.laneless_script_config import active_traffic_model, env_config_from_args
+from scripts.common.laneless_script_config import (
+    DEFAULT_LANELESS_WORKERS,
+    active_traffic_model,
+    env_config_from_args,
+)
 from scripts.training.train_safety_potential_variants import MTM_CONGESTED_UNCERTAIN_UPDATES, deep_update
 
 
@@ -33,6 +37,7 @@ DEFAULT_CHECKPOINT_INTERVAL = 10_000
 DEFAULT_TRAINING_SEED = 307
 DEFAULT_EVAL_SEEDS = tuple(range(900_000, 900_010))
 DEFAULT_EVAL_TIMESTEPS = 800
+DEFAULT_PPO_WORKERS = DEFAULT_LANELESS_WORKERS
 
 ACCELERATION_SCALE = 3.0
 JERK_SCALE = 6.0
@@ -664,6 +669,20 @@ def make_formulation_namespace(
     return namespace
 
 
+def formulation_environment_config(base_config: dict[str, Any]) -> dict[str, Any]:
+    """Return the screen's historical 42D/49D observation configuration.
+
+    The canonical PPO contract is 30 base features plus two previous-action
+    features.  This isolated historical screen instead uses six seven-feature
+    vehicle rows (42D), while P2--P4 append their own seven semantic features.
+    """
+
+    config = copy.deepcopy(base_config)
+    config["observation_include_vehicle_dimensions"] = True
+    config["ppo_append_previous_action"] = False
+    return config
+
+
 def rank_formulations(across_seed: pd.DataFrame) -> pd.DataFrame:
     ranked = across_seed.copy()
     criteria = {
@@ -754,7 +773,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-timesteps", type=int, default=DEFAULT_EVAL_TIMESTEPS)
     parser.add_argument("--strict-checkpoint-retention", type=int, default=2)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--n-envs", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--n-envs",
+        type=int,
+        default=DEFAULT_PPO_WORKERS,
+        help="PPO rollout workers; default=%(default)s.",
+    )
+    parser.add_argument(
+        "--use-subproc",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use SubprocVecEnv for parallel PPO workers (enabled by default)",
+    )
     parser.add_argument("--eval-episodes", type=int, default=1, help=argparse.SUPPRESS)
     parser.add_argument(
         "--eval-horizon", type=int, default=DEFAULT_EVAL_TIMESTEPS, help=argparse.SUPPRESS
@@ -787,8 +817,10 @@ def main() -> int:
         raise ValueError(f"Unknown formulations: {unknown}")
     if len(selected) != len(set(selected)):
         raise ValueError("Formulation list must not contain duplicates")
-    if int(args.n_envs) != 1:
-        raise ValueError("The strict formulation screen requires one environment")
+    if int(args.n_envs) <= 0:
+        raise ValueError("--n-envs must be positive")
+    if int(args.n_envs) > 1 and not bool(args.use_subproc):
+        raise ValueError("Parallel PPO requires SubprocVecEnv workers")
     if not args.eval_seeds or len(args.eval_seeds) != len(set(args.eval_seeds)):
         raise ValueError("Evaluation seeds must be non-empty and unique")
     args.eval_seeds = [int(seed) for seed in args.eval_seeds]
@@ -806,7 +838,9 @@ def main() -> int:
     args.k0 = float(args.cbf_snapshot["k0"])
     args.k1 = float(args.cbf_snapshot["k1"])
     args.eps_side = float(args.cbf_snapshot["eps_side"])
-    env_config = env_config_from_args(args, namespace["ENV_CONFIG"])
+    env_config = formulation_environment_config(
+        env_config_from_args(args, namespace["ENV_CONFIG"])
+    )
     if active_traffic_model(env_config) == "mtm":
         deep_update(env_config, copy.deepcopy(MTM_CONGESTED_UNCERTAIN_UPDATES))
     if not bool(env_config.get("terminate_on_collision", False)):
@@ -818,10 +852,12 @@ def main() -> int:
         for training_seed in args.seeds
         for formulation in selected
     ]
+    rollout_args = copy.copy(args)
+    rollout_args.global_rollout_size = ppo_base.DEFAULT_GLOBAL_ROLLOUT_SIZE
     for _, formulation in run_specs:
         ppo_base.validate_rollout_alignment(
-            PPO_CONFIGS[formulation],
-            n_envs=1,
+            ppo_base.effective_ppo_config(formulation, rollout_args),
+            n_envs=int(args.n_envs),
             target_timesteps=int(args.timesteps),
             checkpoint_interval=int(args.checkpoint_interval),
         )
@@ -844,6 +880,10 @@ def main() -> int:
             "training_seeds": [int(seed) for seed in args.seeds],
             "target_timesteps": int(args.timesteps),
             "checkpoint_interval": int(args.checkpoint_interval),
+            "n_envs": int(args.n_envs),
+            "vectorized_backend": (
+                "SubprocVecEnv" if int(args.n_envs) > 1 else "DummyVecEnv"
+            ),
             "eval_seeds": args.eval_seeds,
             "eval_timesteps": int(args.eval_timesteps),
             "ppo_parameters_frozen_to_q0": Q0_PPO_PARAMETERS,
@@ -863,6 +903,7 @@ def main() -> int:
         print(
             "[ppo-formulation] starting"
             f" configs={selected} seed={args.seeds} timesteps={int(args.timesteps):,}"
+            f" workers={int(args.n_envs)}"
             f" eval_every={int(args.checkpoint_interval):,}"
             f" eval={len(args.eval_seeds)}x{int(args.eval_timesteps)}",
             flush=True,

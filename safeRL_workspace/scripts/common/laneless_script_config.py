@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
+# Shared default for PPO rollout workers and process-backed laneless
+# evaluation. Legacy DDPG entrypoints keep their explicit historical controls.
+DEFAULT_LANELESS_WORKERS = 20
+
+
 def deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):

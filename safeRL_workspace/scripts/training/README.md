@@ -13,7 +13,8 @@ identity, and output location before writing results.
 - `run_ppo_formulation_screen.py`: screen the fixed PPO reward/observation
   formulations.
 - `run_nominal_ppo_parameter_pilot.py` and `run_nominal_ppo_density_pilot.py`:
-  controlled PPO parameter and density pilots.
+  controlled PPO parameter and density pilots; their multi-environment default
+  is 20 spawned rollout workers.
 - `run_cbf_filter_ablation.py`: paired raw-versus-filtered CBF protocol.
 - `run_nominal_ddpg_parameter_pilot.py`: controlled legacy DDPG confirmation.
 

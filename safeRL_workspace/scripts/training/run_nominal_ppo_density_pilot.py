@@ -4,7 +4,8 @@ The reward and PPO hyperparameters are copied from an existing PPO run
 configuration.  The default experiment change is ``vehicles_count``; the
 observation mode and scales can be overridden explicitly.  The environment
 is raw MTM plus the nominal reward wrapper and physical-action adapter; no CBF
-context, constraint, projection, or filter is constructed.
+context, constraint, projection, or filter is constructed. Multi-environment
+training uses the shared 20-worker spawned PPO topology by default.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import functools
 import json
 import time
 from pathlib import Path
@@ -24,13 +26,15 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
 import scripts.evaluation.audit_nominal_mtm_collision_provenance as provenance
+from scripts.common.laneless_script_config import DEFAULT_LANELESS_WORKERS
 
 
 DEFAULT_EVAL_EPISODES = 20
 DEFAULT_EVAL_SEED_START = 1_300_000
+DEFAULT_PPO_WORKERS = DEFAULT_LANELESS_WORKERS
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vehicles-count", type=int, default=10)
     parser.add_argument("--training-seed", type=int, default=307)
     parser.add_argument("--timesteps", type=int, default=50_000)
-    parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument(
+        "--n-envs",
+        type=int,
+        default=DEFAULT_PPO_WORKERS,
+        help="PPO rollout workers (default: %(default)s).",
+    )
     parser.add_argument(
         "--observation-mode",
         choices=("full", "minimal"),
@@ -115,6 +124,26 @@ def _make_env(
     return env
 
 
+def _make_density_worker_env(
+    *,
+    project_root: str,
+    env_config: dict[str, Any],
+    reward_config: dict[str, Any],
+    monitor_path: str,
+) -> gym.Env:
+    """Build one density-pilot environment inside a spawned worker."""
+
+    root = Path(project_root)
+    provenance.basics.notebook_pipeline.set_stable_native_defaults()
+    namespace = provenance._bootstrap_nominal_namespace(root)
+    return _make_env(
+        namespace,
+        env_config=copy.deepcopy(env_config),
+        reward_config=copy.deepcopy(reward_config),
+        monitor_path=Path(monitor_path),
+    )
+
+
 def _make_vec_env(
     namespace: dict[str, Any],
     *,
@@ -123,7 +152,25 @@ def _make_vec_env(
     n_envs: int,
     training_seed: int,
     output_dir: Path,
-) -> DummyVecEnv:
+) -> VecEnv:
+    worker_count = int(n_envs)
+    if worker_count > 1:
+        project_root = str(Path(namespace["PROJECT_ROOT"]).resolve())
+        env_fns = []
+        for rank in range(worker_count):
+            env_fns.append(
+                functools.partial(
+                    _make_density_worker_env,
+                    project_root=project_root,
+                    env_config=copy.deepcopy(env_config),
+                    reward_config=copy.deepcopy(reward_config),
+                    monitor_path=str(output_dir / f"monitor_{rank}.csv"),
+                )
+            )
+        vec_env = SubprocVecEnv(env_fns, start_method="spawn")
+        vec_env.seed(int(training_seed))
+        return vec_env
+
     def factory(rank: int):
         def make() -> gym.Env:
             return _make_env(
@@ -135,7 +182,7 @@ def _make_vec_env(
 
         return make
 
-    vec_env = DummyVecEnv([factory(rank) for rank in range(int(n_envs))])
+    vec_env = DummyVecEnv([factory(rank) for rank in range(worker_count)])
     vec_env.seed(int(training_seed))
     return vec_env
 
@@ -382,6 +429,9 @@ def main() -> int:
         "training_seed": int(args.training_seed),
         "timesteps": int(args.timesteps),
         "n_envs": int(n_envs),
+        "vectorized_backend": (
+            "SubprocVecEnv" if int(n_envs) > 1 else "DummyVecEnv"
+        ),
         "n_steps": int(n_steps),
         "global_rollout_steps": int(n_steps * n_envs),
         "eval_seeds": eval_seeds,

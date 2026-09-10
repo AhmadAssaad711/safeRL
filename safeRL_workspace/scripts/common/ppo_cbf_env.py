@@ -176,6 +176,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         self._last_system: Optional[dict[str, Any]] = None
         self._pending_projection: Optional[dict[str, Any]] = None
         self._previous_executed_action_normalized: Optional[np.ndarray] = None
+        self._last_reset_info: dict[str, Any] = {}
 
     @property
     def physical_low(self) -> np.ndarray:
@@ -184,6 +185,12 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
     @property
     def physical_high(self) -> np.ndarray:
         return self._physical_high.copy()
+
+    @property
+    def last_reset_info(self) -> dict[str, Any]:
+        """Return the accepted reset diagnostics for provenance-aware callers."""
+
+        return dict(self._last_reset_info)
 
     def _constraint_system(self) -> dict[str, Any]:
         ego = self.namespace["get_ego_state"](self)
@@ -434,15 +441,36 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         """
 
         ego = self.namespace["get_ego_state"](self)
-        neighbors = self.namespace["get_neighbor_states"](
+        neighbors = list(self.namespace["get_neighbor_states"](
             self, neighbor_range=self.neighbor_range
-        )
+        ))
+        max_neighbor_constraints = getattr(self, "max_neighbor_constraints", None)
+        if max_neighbor_constraints is not None:
+            neighbors = neighbors[: max_neighbor_constraints]
         h_values: list[float] = []
         psi_values: list[float] = []
-        geometry = self.namespace.get("pairwise_cbf_geometry")
-        relative_state = self.namespace.get("pairwise_relative_state")
-        derivatives = self.namespace.get("centerline_barrier_derivatives")
-        if geometry is not None and relative_state is not None and derivatives is not None:
+        batch_builder = self.namespace.get("batch_pairwise_hocbf_constraints")
+        if callable(batch_builder) and neighbors:
+            batch = batch_builder(
+                ego,
+                neighbors,
+                eps_side=self.eps_side,
+                k0=self.k0,
+                k1=self.k1,
+            )
+            h_values.extend(np.asarray(batch["h"], dtype=float).tolist())
+            psi_values.extend(
+                (
+                    np.asarray(batch["h_dot"], dtype=float)
+                    + self.psi1_gain * np.asarray(batch["h"], dtype=float)
+                ).tolist()
+            )
+        else:
+            geometry = self.namespace.get("pairwise_cbf_geometry")
+            relative_state = self.namespace.get("pairwise_relative_state")
+            derivatives = self.namespace.get("centerline_barrier_derivatives")
+            if geometry is None or relative_state is None or derivatives is None:
+                raise RuntimeError("CBF reset diagnostics require pairwise geometry")
             for neighbor in neighbors:
                 h_value = float(geometry(ego, neighbor, eps_side=self.eps_side)[0])
                 dx, dy, dvx, dvy = relative_state(ego, neighbor)
@@ -628,12 +656,58 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         self._pending_projection = None
         self._previous_executed_action_normalized = None
-        observation, info = self.env.reset(**kwargs)
+        base = self.namespace["_lane_free_base"](self)
+        reset_feasibility = base.config.get("cbf_reset_feasibility", {})
+        if reset_feasibility is None:
+            reset_feasibility = {}
+        if not isinstance(reset_feasibility, dict):
+            raise TypeError("cbf_reset_feasibility must be a mapping when provided")
+        feasibility_enabled = bool(reset_feasibility.get("enabled", False))
+        if feasibility_enabled:
+            if "max_attempts" not in reset_feasibility:
+                raise ValueError(
+                    "cbf_reset_feasibility.enabled requires an explicit max_attempts"
+                )
+            max_attempts = int(reset_feasibility["max_attempts"])
+            if max_attempts <= 0:
+                raise ValueError("cbf_reset_feasibility.max_attempts must be positive")
+            if kwargs.get("seed") is None:
+                raise ValueError(
+                    "CBF reset-feasibility sampling requires an explicit reset seed"
+                )
+            initial_seed = int(kwargs["seed"])
+        else:
+            max_attempts = 1
+            initial_seed = None
+
+        for retry_count in range(max_attempts):
+            candidate_kwargs = dict(kwargs)
+            candidate_seed = None
+            if feasibility_enabled:
+                candidate_seed = int(initial_seed + retry_count)
+                candidate_kwargs["seed"] = candidate_seed
+            observation, info = self.env.reset(**candidate_kwargs)
+            initial_safety = self._initial_safety_diagnostics()
+            if not feasibility_enabled or bool(initial_safety["cbf_initial_safe_set"]):
+                break
+        else:
+            raise RuntimeError(
+                "CBF reset-feasibility sampler exhausted candidate seeds: "
+                f"initial_seed={initial_seed}, max_attempts={max_attempts}, "
+                f"min_h={initial_safety['cbf_initial_min_h']:.6f}, "
+                f"min_psi1={initial_safety['cbf_initial_min_psi1']:.6f}"
+            )
+
         system = self._constraint_system()
         info = dict(info)
-        initial_safety = self._initial_safety_diagnostics()
         info.update(initial_safety)
-        base = self.namespace["_lane_free_base"](self)
+        reset_metadata = {
+            "cbf_reset_feasibility_enabled": feasibility_enabled,
+            "cbf_reset_max_attempts": int(max_attempts),
+            "cbf_reset_retry_count": int(retry_count),
+            "cbf_reset_candidate_seed": candidate_seed,
+        }
+        info.update(reset_metadata)
         traffic_safety = base.config.get("traffic_safety", {})
         # An explicit top-level setting is authoritative.  This lets an
         # evaluation protocol retain the source run's CBF-safe spawn sampler
@@ -658,6 +732,10 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             )
         info["cbf_constraint_hash"] = str(system["hash"])
         info["cbf_constraint_count"] = int(system["rows"].shape[0])
+        self._last_reset_info = {
+            **initial_safety,
+            **reset_metadata,
+        }
         return self._augment_observation(observation, system), info
 
     def _box_record(self, action: Any, system: dict[str, Any]) -> dict[str, Any]:

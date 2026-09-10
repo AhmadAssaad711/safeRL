@@ -1,4 +1,4 @@
-"""Vectorized relative-position HOCBF geometry.
+"""Vectorized fixed relative-position HOCBF geometry.
 
 The pairwise safety set is a fixed, axis-aligned ellipse using the
 minimum-area enclosing ellipse for the 3.6 m by 1.8 m reference vehicle.
@@ -15,9 +15,8 @@ import numpy as np
 
 
 # These are CBF semi-axes, not the physical dimensions of the simulator
-# bodies.  They are the minimum-area enclosing ellipse for the configured
-# 3.6 m by 1.8 m reference vehicle.  The corresponding full axes are
-# approximately 5.0912 m and 2.5456 m.
+# bodies. They are the minimum-area enclosing ellipse for the configured
+# 3.6 m by 1.8 m reference vehicle.
 CBF_REFERENCE_VEHICLE_LENGTH_M = 3.6
 CBF_REFERENCE_VEHICLE_WIDTH_M = 1.8
 CBF_RELATIVE_ELLIPSE_A = CBF_REFERENCE_VEHICLE_LENGTH_M / np.sqrt(2.0)
@@ -58,12 +57,11 @@ def _relative_state(
 def _fixed_ellipse_values(
     points: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return ``h``, center distance, and the two directional radii.
+    """Return ``h``, center distance, and split directional radii.
 
-    ``points`` may have any leading shape ending in ``(2,)``.  Splitting the
-    directional boundary equally between the two vehicles preserves the
-    existing ``l_ego + l_other`` diagnostic while making the barrier itself
-    the requested relative-position ellipse.
+    Splitting the boundary radius equally preserves the legacy
+    ``l_ego + l_other`` diagnostic while the barrier remains the requested
+    relative-position ellipse.
     """
 
     points = np.asarray(points, dtype=float)
@@ -80,8 +78,7 @@ def _fixed_ellipse_values(
         (np.cos(phi) / float(CBF_RELATIVE_ELLIPSE_A)) ** 2
         + (np.sin(phi) / float(CBF_RELATIVE_ELLIPSE_B)) ** 2
     )
-    boundary_radius = 1.0 / np.maximum(direction_denom, 1e-12)
-    half_boundary_radius = 0.5 * boundary_radius
+    half_boundary_radius = 0.5 / np.maximum(direction_denom, 1e-12)
     return h, radius, half_boundary_radius, half_boundary_radius
 
 
@@ -98,9 +95,8 @@ def _clearance_batch(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Evaluate the fixed ellipse for ``(neighbor, stencil_point, xy)`` points.
 
-    The vehicle dimensions, headings, and ``eps_side`` arguments remain in
-    the signature for compatibility with existing callers and manifests, but
-    they do not alter this fixed relative-position geometry.
+    The vehicle dimensions, headings, and ``eps_side`` are retained only for
+    API compatibility. They do not alter the fixed relative geometry.
     """
 
     del (
@@ -123,11 +119,11 @@ def batch_centerline_barrier_derivatives(
     eps_side: float,
     fd_step: float = 1e-3,
 ) -> dict[str, np.ndarray]:
-    """Return the analytic fixed-ellipse geometry for many neighbors.
+    """Return analytic fixed-ellipse geometry for many neighbors.
 
     ``points`` contains each neighbor's relative ``[dx, dy]`` position and
     must have shape ``(N, 2)``.  The returned arrays retain one row per input
-    neighbor.  ``fd_step`` is retained for API compatibility but is not used
+    neighbor. ``fd_step`` is retained for API compatibility but is not used
     because the requested quadratic barrier has exact derivatives.
     """
 

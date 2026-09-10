@@ -4,8 +4,10 @@ These modules are reusable building blocks rather than long-running experiment
 entry points. They reconstruct the notebook contract and should be imported by
 training/evaluation workflows instead of copied.
 
-- `laneless_script_config.py`: shared CLI arguments and traffic/environment
-  configuration normalization.
+- `laneless_script_config.py`: shared CLI arguments, traffic/environment
+  configuration normalization, and the canonical 20-worker default used by
+  PPO rollout and laneless evaluation entry points. Legacy DDPG controls remain
+  explicit in their historical runners.
 - `laneless_training_registry.py` and `laneless_evaluation_registry.py`:
   provenance, run identity, manifest, and atomic-output helpers.
 - `cbf_geometry.py`, `cbf_projection.py`, and `cbf_ray_mask.py`: batched

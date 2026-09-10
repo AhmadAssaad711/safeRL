@@ -495,10 +495,14 @@ def test_tensorboard_run_label_isolated_for_new_budget(tmp_path, monkeypatch):
 def test_very_long_windows_tensorboard_path_falls_back_to_local_app_data(
     tmp_path, monkeypatch
 ):
-    project_root = tmp_path / ("p" * 180) / "project"
-    project_root.mkdir(parents=True)
+    # The path needs to be short enough to create on Windows.  The uncreated
+    # run path and label below still force the TensorBoard fallback branch.
+    project_root = tmp_path / "project"
+    project_root.mkdir()
     long_run_dir = project_root / "artifacts" / ("x" * 120) / "seed_307"
-    local_app_data = tmp_path / "local_app_data"
+    # Keep the fallback writable and just below the representative event-file
+    # limit; a named child directory here would make the test fixture too long.
+    local_app_data = tmp_path
     run_label = "run_" + "x" * 500
     monkeypatch.setattr(progression.os, "name", "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
@@ -514,7 +518,8 @@ def test_very_long_windows_tensorboard_path_falls_back_to_local_app_data(
     project_id = hashlib.sha1(
         str(project_root.resolve()).encode("utf-8")
     ).hexdigest()[:10]
-    run_id = "nom_307_" + hashlib.sha1(run_label.encode("utf-8")).hexdigest()[:10]
+    resolved_label = f"{run_label}_nom_307"
+    run_id = "nom_307_" + hashlib.sha1(resolved_label.encode("utf-8")).hexdigest()[:10]
     assert log_dir == local_app_data / "highway_rl_tb" / project_id / run_id
     assert log_dir.is_dir()
     assert progression._tensorboard_path_is_safe(log_dir)
@@ -873,6 +878,8 @@ def test_cli_defaults_ensure_training_and_alias_supports_existing_only(monkeypat
     assert not defaults.skip_training
     assert not defaults.force_retrain
     assert defaults.post_train_eval_episodes == 200
+    assert defaults.n_envs == 20
+    assert defaults.post_train_eval_workers == 20
     assert not defaults.skip_post_train_evaluation
     assert defaults.lambda_critic == 0.0
 
@@ -883,6 +890,25 @@ def test_cli_defaults_ensure_training_and_alias_supports_existing_only(monkeypat
     )
     evaluation_only = progression.parse_args()
     assert evaluation_only.skip_training
+
+
+def test_reward_config_file_loader_validates_explicit_scalar_overrides(tmp_path):
+    config_path = tmp_path / "reward.json"
+    config_path.write_text(
+        json.dumps({"wx": 2.0, "progress_reward_weight": 0.25}),
+        encoding="utf-8",
+    )
+    assert progression.load_reward_config_file(
+        config_path, allowed_keys={"wx", "progress_reward_weight"}
+    ) == {"wx": 2.0, "progress_reward_weight": 0.25}
+
+    config_path.write_text(json.dumps({"unknown": 1.0}), encoding="utf-8")
+    with np.testing.assert_raises_regex(ValueError, "unknown keys"):
+        progression.load_reward_config_file(config_path, allowed_keys={"wx"})
+
+    config_path.write_text(json.dumps({"wx": [2.0]}), encoding="utf-8")
+    with np.testing.assert_raises_regex(ValueError, "scalar"):
+        progression.load_reward_config_file(config_path, allowed_keys={"wx"})
 
 
 def test_parallel_rollout_config_preserves_the_global_ppo_batch_geometry():

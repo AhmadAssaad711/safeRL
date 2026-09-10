@@ -15,7 +15,7 @@ fixed-timestep outputs; the legacy in-notebook PPO implementation is removed.
   when the run starts; normal episode resets are not reseeded.
 - Budget: exactly 50,000 timesteps per configuration.
 - PPO rollout: 1,000 global transitions, batch size 100. The CUDA pilot uses
-  eight workers with 125 steps each; it still has exact post-update boundaries
+  20 workers with 50 steps each; it still has exact post-update boundaries
   at 10k, 20k, 30k, 40k, and 50k.
 - Evaluation: deterministic, fixed seeds `900000` through `900009`, 800
   timesteps per seed, once after the final 50k post-update policy. Lightweight

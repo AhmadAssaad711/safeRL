@@ -23,6 +23,7 @@ def formulation_setup():
     env_config = copy.deepcopy(namespace["ENV_CONFIG"])
     env_config["traffic_model"] = "mtm"
     deep_update(env_config, copy.deepcopy(MTM_CONGESTED_UNCERTAIN_UPDATES))
+    env_config = screen.formulation_environment_config(env_config)
     env_config["ego_boundary_force"] = True
     reward_config = pipeline.make_base_reward_config(namespace)
     return namespace, env_config, reward_config
@@ -48,6 +49,7 @@ def find_formulation_wrapper(env):
 
 
 def test_registry_freezes_q0_and_records_exact_variant_spaces():
+    assert screen.DEFAULT_PPO_WORKERS == 20
     assert tuple(screen.FORMULATIONS) == (
         "P0_current",
         "P1_reward",
@@ -60,6 +62,22 @@ def test_registry_freezes_q0_and_records_exact_variant_spaces():
     assert screen.FORMULATIONS["P2_observed"]["observation_dim"] == 49
     assert screen.FORMULATIONS["P3_jerk"]["action_low"] == [-8.0, -8.0]
     assert screen.REFERENCE_GAINS == {"k_v": 1.0, "k_p": 1.0, "k_d": 2.0}
+
+
+def test_screen_observation_config_preserves_the_historical_42d_49d_contract():
+    canonical = {
+        "observation_include_vehicle_dimensions": False,
+        "ppo_append_previous_action": True,
+    }
+
+    screen_config = screen.formulation_environment_config(canonical)
+
+    assert screen_config["observation_include_vehicle_dimensions"] is True
+    assert screen_config["ppo_append_previous_action"] is False
+    assert canonical == {
+        "observation_include_vehicle_dimensions": False,
+        "ppo_append_previous_action": True,
+    }
 
 
 def test_all_formulations_share_initial_base_state_and_declared_spaces(
