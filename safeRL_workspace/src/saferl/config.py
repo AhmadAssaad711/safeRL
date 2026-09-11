@@ -190,8 +190,12 @@ class SafetyConfig:
     """Fixed HOCBF and CBF-footprint safety constants."""
 
     eps_side: float = 0.10
-    k0: float = 5.29
-    k1: float = 3.68
+    # HOCBF cascade psi1 = h_dot + c1*h, psi2 = psi1_dot + c2*psi1 with
+    # (c1, c2) = (0.5, 8): k1 = c1 + c2, k0 = c1 * c2.  The QP uses only
+    # (k0, k1).  psi1_gain is the separate spawn/reset guard gain; it stays
+    # at 2.3 because the gain ablation was measured on 2.3-guarded scenes.
+    k0: float = 4.0
+    k1: float = 8.5
     psi1_gain: float = 2.30
     relative_ellipse_a_m: float = PAIRWISE_RELATIVE_ELLIPSE_A_M
     relative_ellipse_b_m: float = PAIRWISE_RELATIVE_ELLIPSE_B_M

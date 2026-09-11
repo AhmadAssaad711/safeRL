@@ -25,10 +25,10 @@ CBF_REFERENCE_VEHICLE_LENGTH_M = 3.6
 CBF_REFERENCE_VEHICLE_WIDTH_M = 1.8
 CBF_RELATIVE_ELLIPSE_A = 2.0 * CBF_REFERENCE_VEHICLE_LENGTH_M / math.sqrt(2.0)
 CBF_RELATIVE_ELLIPSE_B = 2.0 * CBF_REFERENCE_VEHICLE_WIDTH_M / math.sqrt(2.0)
-# Critical-damping first-level gain: psi_1 = h_dot + lambda_1 h.
-# This is deliberately separate from HOCBF ``k1``: for the alternative
-# (k1, k0) = (4.6, 5.29), lambda_1 = sqrt(k0) = 2.3 while k1 remains the
-# coefficient of h_dot in psi_2.
+# Spawn/reset guard gain: a scene is accepted only if psi_1 = h_dot + 2.3 h >= 0.
+# This is deliberately separate from the HOCBF rates used by the QP
+# ((k1, k0) = (8.5, 4.0), i.e. c1 = 0.5, c2 = 8): the gain ablation that
+# selected those rates was measured on scenes built with this guard.
 CBF_PSI1_GAIN = 2.3
 
 

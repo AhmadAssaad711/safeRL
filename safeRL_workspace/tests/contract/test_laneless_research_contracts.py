@@ -28,8 +28,22 @@ def test_new_research_configuration_centralizes_canonical_contract():
     assert config.action.physical_low == (-3.0, -3.0)
     assert config.action.physical_high == (3.0, 3.0)
     assert config.safety.eps_side == pytest.approx(0.10)
-    assert config.safety.k0 == pytest.approx(5.29)
-    assert config.safety.k1 == pytest.approx(3.68)
+    assert config.safety.k0 == pytest.approx(4.0)
+    assert config.safety.k1 == pytest.approx(8.5)
+    # A valid HOCBF cascade needs real, positive class-K rates: k1^2 >= 4 k0.
+    discriminant = config.safety.k1**2 - 4.0 * config.safety.k0
+    assert discriminant >= 0.0
+    rates = sorted(
+        [
+            0.5 * (config.safety.k1 - np.sqrt(discriminant)),
+            0.5 * (config.safety.k1 + np.sqrt(discriminant)),
+        ]
+    )
+    assert rates == pytest.approx([0.5, 8.0])
+    # The spawn/reset guard gain is separate from the QP rates.
+    assert config.safety.psi1_gain == pytest.approx(2.3)
+    traffic_safety = config.resolved_environment_config()["traffic_safety"]
+    assert traffic_safety["spawn_cbf_psi1_gain"] == pytest.approx(2.3)
     assert config.safety.relative_ellipse_a_m == pytest.approx(2.0 * 3.6 / np.sqrt(2.0))
     assert config.safety.relative_ellipse_b_m == pytest.approx(2.0 * 1.8 / np.sqrt(2.0))
 

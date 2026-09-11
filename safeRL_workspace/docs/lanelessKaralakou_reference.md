@@ -49,7 +49,8 @@ remains otherwise unchanged.
 | Acceleration bounds | ax, ay in [-3, 3] | The common physical action box |
 | Ego speed target | 16 m/s | Fixed target used by reward and observation |
 | Surrounding desired speeds | 15 to 25 m/s | Sampled traffic speed range |
-| CBF reset guard | h >= 0 and psi1 = h_dot + 2.3 h >= 0 | Critical-damping first-level condition |
+| CBF gains | k1 = 8.5, k0 = 4.0 | HOCBF cascade with class-K rates c1 = 0.5, c2 = 8 |
+| CBF reset guard | h >= 0 and psi1 = h_dot + 2.3 h >= 0 | Spawn/reset gain, separate from the QP rates |
 | PPO state | 32D | 30D target-y vehicle table plus 2 previous-action values |
 | Evaluation task | 1,000 m | Collision-free distance completion |
 | Evaluation timeout | 3,000 policy steps | Guard against non-progressing rollouts |
@@ -263,16 +264,29 @@ The resolved source for these values is `SafetyConfig` in
 configuration. The notebook and compatibility modules mirror that resolved
 contract for historical execution paths.
 
-For the critical-damping alternative `(k1, k0) = (4.6, 5.29)`, the two
-levels are:
+The gains follow the HOCBF cascade with linear class-K rates c1 and c2:
 
-    psi1 = h_dot + 2.3*h
-    psi2 = h_ddot + k1*h_dot + k0*h >= 0
+    psi1 = h_dot + c1*h
+    psi2 = psi1_dot + c2*psi1 = h_ddot + (c1 + c2)*h_dot + c1*c2*h >= 0
 
-The canonical notebook default remains eps_side = 0.10, k0 = 5.29, k1 = 3.68,
-neighbor range = 90 m, maximum neighbor constraints = 12, and feasibility
-tolerance = 1e-3. Critical-gain runs override the HOCBF `k1` to 4.6; they
-continue to use the separate first-level gain `psi1_gain = 2.3`.
+so k1 = c1 + c2 and k0 = c1*c2. Any c1, c2 > 0 is a valid HOCBF (real
+roots, k1^2 >= 4*k0). The canonical choice is (c1, c2) = (0.5, 8), i.e.
+k1 = 8.5, k0 = 4.0, with eps_side = 0.10, neighbor range = 90 m, maximum
+neighbor constraints = 12, and feasibility tolerance = 1e-3. The QP row
+depends only on (k0, k1), which is symmetric in c1 and c2.
+
+The spawn and reset guard keeps its own gain, psi1_gain = 2.3: a scene is
+accepted only if h >= 0 and h_dot + 2.3*h >= 0. This gain does not enter the
+QP; it selects initial states and scales the `psi1_min` diagnostic. It stays
+at 2.3 because the gain ablation measured every (c1, c2) cell on scenes built
+with this guard. A 2.3-guarded scene is not guaranteed to satisfy the
+cascade's own first-level condition h_dot + 0.5*h >= 0 at reset.
+
+The former default k0 = 5.29, k1 = 3.68 had complex roots (k1^2 < 4*k0),
+so it was not a valid HOCBF cascade. The 2026-09-11 gain ablation
+(`docs/experiments/cbf_gain_density_ablation_20260911.md`) selected
+(0.5, 8): on 200 paired 40-vehicle episodes it cut ego collisions/km from
+2.71 to 0.50 and raised 1,000 m completion from 6% to 60%.
 
 The filter adds pairwise neighbor rows and lateral boundary rows to a
 two-dimensional linear constraint system. It first tests whether the raw
