@@ -85,7 +85,7 @@ class EnvironmentConfig:
     environment_id: str = "lane-free-v0"
     road_length_m: float = 380.0
     road_width_m: float = 10.2
-    vehicles_count: int = 55
+    vehicles_count: int = 40
     neighbors_count: int = 5
     sensing_range_m: float = 90.0
     episode_steps: int = 30_000

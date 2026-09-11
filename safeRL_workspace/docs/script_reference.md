@@ -63,7 +63,7 @@ configuration and use the smoke or evaluation entry points first.
 The notebook reference contains the exact values and cell order. Scripts should
 not silently replace them with lane-indexed highway-v0 assumptions.
 
-- Environment: lane-free-v0 with MTM traffic, a 380 by 10.2 m road, 55
+- Environment: lane-free-v0 with MTM traffic, a 380 by 10.2 m road, 40
   vehicles, five visible neighbors, and a 90 m sensing range.
 - Timing: 100 Hz physics (`dt=0.01 s`), 20 Hz policy decisions, and a 20 Hz
   policy-rate CBF update. Each policy action spans five physics frames.

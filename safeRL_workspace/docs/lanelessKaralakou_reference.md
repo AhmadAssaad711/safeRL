@@ -41,7 +41,7 @@ remains otherwise unchanged.
 | Environment ID | lane-free-v0 | Registered by lane_free_env.py |
 | Traffic model | MTM | Congested and uncertain surrounding traffic |
 | Road | 380 m by 10.2 m ring | Longitudinal distance wraps around |
-| Vehicles | 55 total | One controlled ego plus surrounding traffic |
+| Vehicles | 40 total | One controlled ego plus surrounding traffic (55 before 2026-09-11) |
 | Neighbor rows | 5 | Nearest sensed vehicles are exposed to the policy |
 | Physics | dt = 0.01 s, 100 Hz | Five simulator frames per policy action |
 | Policy rate | 20 Hz | One action is held for five physics frames |
