@@ -1,0 +1,6 @@
+{
+  "cbf_require_initial_safe_set": false,
+  "traffic_safety": {
+    "guard_ego_interactions": true
+  }
+}
