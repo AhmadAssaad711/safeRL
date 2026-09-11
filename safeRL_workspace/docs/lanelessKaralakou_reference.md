@@ -143,6 +143,27 @@ backward-compatible artifacts, but the canonical ego target is the fixed
 16 m/s value. Progress is distance-normalized; it is not normalized by
 elapsed time or target speed.
 
+### Linear tracking mode (script-only)
+
+The notebook reward above is the default (`reward_mode` omitted or
+`reciprocal`). `run_ppo_cbf_progression --reward-mode linear` replaces only
+the reciprocal first term with the weighted mean implemented in
+`src/saferl/rewards.py`:
+
+    r_track = sum_i w_i * (1 - clip(c_i, 0, 1)) / sum_i w_i,
+    i in {x, y, f, ay}, using the same wx, wy, wf, way
+
+so the canonical weights become 0.377 (cx), 0.245 (cy), 0.377 (cf), and 0
+(cay). Each cost's pull is the constant w_i / sum_i w_i instead of
+epsilon_r * w_i / denom^2, which weakens whenever any cost is large;
+epsilon_r is unused. r_track stays in [0, 1], so the per-step reward never
+turns persistently negative and collision termination never becomes
+attractive. Progress, jerk, collision, and overtake terms are unchanged. The
+wrapper additionally publishes karalakou_linear_tracking_reward,
+karalakou_event_reward, and karalakou_reciprocal_mode_reward (the total the
+reciprocal mode would have returned). Any other `reward_mode` value is
+rejected when the environment is built.
+
 The wrapper publishes reward components under the karalakou_ prefix in info.
 Important fields include karalakou_cf, karalakou_target_y,
 karalakou_target_speed, karalakou_lat_y_error_m, karalakou_ego_speed,

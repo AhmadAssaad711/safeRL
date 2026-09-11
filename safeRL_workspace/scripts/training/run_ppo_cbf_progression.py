@@ -31,6 +31,7 @@ import multiprocessing as mp
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -82,6 +83,12 @@ from scripts.common.projected_ppo_cbf import (
 )
 from scripts.training.run_nominal_ppo_parameter_pilot import PPOActionClipCallback, PPO_CONFIGS
 from scripts.training.train_safety_potential_variants import MTM_CONGESTED_UNCERTAIN_UPDATES
+
+try:
+    from saferl.rewards import LINEAR_REWARD_MODE, make_linear_reward_wrapper, resolve_reward_mode
+except ModuleNotFoundError:  # Support direct ``python -m`` execution from the workspace.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from saferl.rewards import LINEAR_REWARD_MODE, make_linear_reward_wrapper, resolve_reward_mode
 
 
 PROGRESSION_SCHEMA_VERSION = 11
@@ -1292,12 +1299,13 @@ def _base_environment(
     reward_config: dict[str, float],
 ) -> gym.Env:
     _ensure_ppo_observation_variant(namespace, env_config)
+    reward_wrapper = namespace["KaralakouRewardWrapper"]
+    if resolve_reward_mode(reward_config) == LINEAR_REWARD_MODE:
+        reward_wrapper = make_linear_reward_wrapper(reward_wrapper)
     env = gym.make(
         "lane-free-v0", render_mode=None, config=copy.deepcopy(env_config)
     )
-    env = namespace["KaralakouRewardWrapper"](
-        env, reward_config=copy.deepcopy(reward_config)
-    )
+    env = reward_wrapper(env, reward_config=copy.deepcopy(reward_config))
     if namespace.get("NORMALIZE_RL_OBSERVATIONS", False):
         observation_dim = int(np.prod(env.observation_space.shape))
         if observation_dim in {30, 32}:
@@ -3844,9 +3852,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reward-mode",
-        choices=("reciprocal", "additive"),
+        choices=("reciprocal", "linear"),
         default=None,
-        help="Select the bounded additive reward or the legacy reciprocal reward.",
+        help=(
+            "Tracking term of the base reward: the notebook reciprocal "
+            "eps/(eps+sum w_i c_i), or the linear weighted mean "
+            "sum w_i (1-c_i)/sum w_i from saferl.rewards; omitted means reciprocal."
+        ),
     )
     parser.add_argument(
         "--speed-reward-weight",
@@ -3866,7 +3878,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Override `wy`, the active lateral target-error cost weight in "
-            "the reciprocal Karalakou reward."
+            "the Karalakou tracking term (reciprocal or linear)."
         ),
     )
     parser.add_argument(
