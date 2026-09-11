@@ -41,6 +41,8 @@ def _signature_args(**overrides: object) -> SimpleNamespace:
         "n_steps": None,
         "batch_size": None,
         "n_epochs": None,
+        "ent_coef": None,
+        "gamma": None,
         "lambda_delta": 0.05,
         "lambda_intervention": 0.10,
         "lambda_mean": 0.10,

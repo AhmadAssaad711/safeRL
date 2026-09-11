@@ -1666,6 +1666,10 @@ def resolved_ppo_config(args: argparse.Namespace) -> dict[str, Any]:
         config["batch_size"] = int(args.batch_size)
     if args.n_epochs is not None:
         config["n_epochs"] = int(args.n_epochs)
+    if args.ent_coef is not None:
+        config["ent_coef"] = float(args.ent_coef)
+    if args.gamma is not None:
+        config["gamma"] = float(args.gamma)
     topology = training_topology(args)
     n_envs = int(topology["n_envs"])
     rollout_size = int(config["n_steps"])
@@ -3817,6 +3821,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--n-epochs", type=int, default=None)
+    parser.add_argument(
+        "--ent-coef",
+        type=float,
+        default=None,
+        help="Override the PPO entropy bonus coefficient from the selected --ppo-config.",
+    )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=None,
+        help="Override the PPO discount factor from the selected --ppo-config.",
+    )
     parser.add_argument(
         "--collision-penalty",
         type=float,
