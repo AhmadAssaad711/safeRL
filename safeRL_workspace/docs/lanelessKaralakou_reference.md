@@ -165,6 +165,26 @@ karalakou_event_reward, and karalakou_reciprocal_mode_reward (the total the
 reciprocal mode would have returned). Any other `reward_mode` value is
 rejected when the environment is built.
 
+### Lateral target fallback and overtake detection (script-only)
+
+Two further opt-in `run_ppo_cbf_progression` flags, implemented in
+`src/saferl/rewards.py`, compose with either reward mode. Omitting them keeps
+the notebook behavior.
+
+- `--lateral-target-fallback center`: when no free gap exists ahead, cy
+  targets the road center instead of the fastest blocker's y. At 55 vehicles
+  there is no gap on about 99% of steps (95% at 40), and the fastest-blocker
+  fallback is on the ego's opposite road half about half the time. The
+  exposed target-y observation follows the same target.
+- `--overtake-detection latched`: the notebook test requires a vehicle to go
+  from ahead to more than half an ego length behind within one policy step,
+  which needs more than 35 m/s of relative speed at 20 Hz, so the bonus is
+  never paid. The latched detector counts a vehicle that was seen ahead
+  (within sensing range) at any earlier step and is now more than half an
+  ego length behind, still within sensing range, at most once per vehicle
+  per episode. The bonus value (`--overtake-bonus`) and its one-per-step
+  cap are unchanged.
+
 The wrapper publishes reward components under the karalakou_ prefix in info.
 Important fields include karalakou_cf, karalakou_target_y,
 karalakou_target_speed, karalakou_lat_y_error_m, karalakou_ego_speed,

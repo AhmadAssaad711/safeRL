@@ -85,10 +85,15 @@ from scripts.training.run_nominal_ppo_parameter_pilot import PPOActionClipCallba
 from scripts.training.train_safety_potential_variants import MTM_CONGESTED_UNCERTAIN_UPDATES
 
 try:
-    from saferl.rewards import LINEAR_REWARD_MODE, make_linear_reward_wrapper, resolve_reward_mode
+    import saferl.rewards  # noqa: F401
 except ModuleNotFoundError:  # Support direct ``python -m`` execution from the workspace.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-    from saferl.rewards import LINEAR_REWARD_MODE, make_linear_reward_wrapper, resolve_reward_mode
+from saferl.rewards import (
+    add_reward_variant_arguments,
+    apply_reward_variant_arguments,
+    reward_variant_summary,
+    wrap_reward_variants,
+)
 
 
 PROGRESSION_SCHEMA_VERSION = 11
@@ -1299,9 +1304,7 @@ def _base_environment(
     reward_config: dict[str, float],
 ) -> gym.Env:
     _ensure_ppo_observation_variant(namespace, env_config)
-    reward_wrapper = namespace["KaralakouRewardWrapper"]
-    if resolve_reward_mode(reward_config) == LINEAR_REWARD_MODE:
-        reward_wrapper = make_linear_reward_wrapper(reward_wrapper)
+    reward_wrapper = wrap_reward_variants(namespace["KaralakouRewardWrapper"], reward_config)
     env = gym.make(
         "lane-free-v0", render_mode=None, config=copy.deepcopy(env_config)
     )
@@ -3850,16 +3853,7 @@ def parse_args() -> argparse.Namespace:
             "reward; omitted means use the notebook value."
         ),
     )
-    parser.add_argument(
-        "--reward-mode",
-        choices=("reciprocal", "linear"),
-        default=None,
-        help=(
-            "Tracking term of the base reward: the notebook reciprocal "
-            "eps/(eps+sum w_i c_i), or the linear weighted mean "
-            "sum w_i (1-c_i)/sum w_i from saferl.rewards; omitted means reciprocal."
-        ),
-    )
+    add_reward_variant_arguments(parser)
     parser.add_argument(
         "--speed-reward-weight",
         type=float,
@@ -4455,8 +4449,7 @@ def main() -> int:
         if not np.isfinite(float(args.collision_penalty)):
             raise ValueError("--collision-penalty must be finite")
         reward_config["collision_penalty"] = float(args.collision_penalty)
-    if args.reward_mode is not None:
-        reward_config["reward_mode"] = str(args.reward_mode)
+    apply_reward_variant_arguments(args, reward_config)
     if args.progress_reward_weight is not None:
         if not np.isfinite(float(args.progress_reward_weight)):
             raise ValueError("--progress-reward-weight must be finite")
@@ -4623,7 +4616,7 @@ def main() -> int:
             "seeds": args.seeds,
             "timesteps": int(args.timesteps),
             "collision_penalty": float(reward_config["collision_penalty"]),
-            "reward_mode": str(reward_config.get("reward_mode", "reciprocal")),
+            **reward_variant_summary(reward_config),
             "speed_error_weight_wx": float(reward_config.get("wx", np.nan)),
             "progress_reward_weight": float(
                 reward_config["progress_reward_weight"]
@@ -4946,7 +4939,7 @@ def main() -> int:
         ),
         "correction_epsilon": float(args.correction_epsilon),
         "collision_penalty": float(reward_config["collision_penalty"]),
-        "reward_mode": str(reward_config.get("reward_mode", "reciprocal")),
+        **reward_variant_summary(reward_config),
         "progress_reward_weight": float(
             reward_config["progress_reward_weight"]
         ),
