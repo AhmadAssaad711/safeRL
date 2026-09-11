@@ -228,11 +228,11 @@ rollouts.
 
 ### Launch guard
 
-The prose at the top of the notebook says the launch switch is conservative,
-but the current B.0 code sets PPO_1M_RUN_TRAINING to True. Set it to False
-before a documentation-only or inspection pass. The same cell also requires
-CUDA when training is enabled. This mismatch is recorded here so a reader
-does not infer a safe dry-run default from the prose alone.
+The B.0 launch controls are enabled for a complete rerun of the seven-policy
+ladder: `PPO_1M_RUN_TRAINING = True` and
+`PPO_1M_FORCE_RETRAIN = True`. Set both to `False` before a
+documentation-only or inspection pass. The same cell also requires CUDA when
+training is enabled through `PPO_1M_REQUIRE_CUDA = True`.
 
 ## CBF geometry and filtering
 
