@@ -1,9 +1,17 @@
 """Vectorized fixed relative-position HOCBF geometry.
 
-The pairwise safety set is a fixed, axis-aligned ellipse using the
-minimum-area enclosing ellipse for the 3.6 m by 1.8 m reference vehicle.
-Its semi-axes are ``3.6 / sqrt(2)`` and ``1.8 / sqrt(2)``.  This module keeps
-the shared batch implementation independent of notebook state so spawned
+The pairwise safety set is a fixed, axis-aligned ellipse test on the
+ego-to-neighbor center vector. Each vehicle is individually enclosed by the
+minimum-area ellipse for a 3.6 m by 1.8 m reference vehicle (semi-axes
+``3.6 / sqrt(2)`` and ``1.8 / sqrt(2)``). For two identical, axis-aligned
+ellipses, "ego's ellipse does not overlap neighbor's ellipse" is exactly
+equivalent to the center-to-center vector lying outside the *same* ellipse
+scaled by 2 (the Minkowski sum of an ellipse with itself is that ellipse at
+twice the radius). The relative barrier therefore uses semi-axes ``2 * 3.6 /
+sqrt(2)`` and ``2 * 1.8 / sqrt(2)`` -- using the unscaled per-vehicle values
+here would only bound one vehicle's own footprint against a point neighbor,
+not two finite-size vehicles against each other. This module keeps the
+shared batch implementation independent of notebook state so spawned
 workers and direct notebook execution use the same barrier and derivatives.
 """
 
@@ -14,13 +22,16 @@ from typing import Any, Optional
 import numpy as np
 
 
-# These are CBF semi-axes, not the physical dimensions of the simulator
-# bodies. They are the minimum-area enclosing ellipse for the configured
-# 3.6 m by 1.8 m reference vehicle.
+# Per-vehicle reference dimensions (not the CBF semi-axes themselves, and not
+# necessarily the exact simulator body size -- see module docstring).
 CBF_REFERENCE_VEHICLE_LENGTH_M = 3.6
 CBF_REFERENCE_VEHICLE_WIDTH_M = 1.8
-CBF_RELATIVE_ELLIPSE_A = CBF_REFERENCE_VEHICLE_LENGTH_M / np.sqrt(2.0)
-CBF_RELATIVE_ELLIPSE_B = CBF_REFERENCE_VEHICLE_WIDTH_M / np.sqrt(2.0)
+
+# The relative barrier compares ego-to-neighbor *center* separation, so it
+# must use the combined (Minkowski-sum) extent of both vehicles' ellipses,
+# i.e. twice the single-vehicle minimum-area-enclosing-ellipse semi-axes.
+CBF_RELATIVE_ELLIPSE_A = 2.0 * CBF_REFERENCE_VEHICLE_LENGTH_M / np.sqrt(2.0)
+CBF_RELATIVE_ELLIPSE_B = 2.0 * CBF_REFERENCE_VEHICLE_WIDTH_M / np.sqrt(2.0)
 
 
 def _wrapped_signed_dx(raw_dx: float, road_length: Optional[float]) -> float:

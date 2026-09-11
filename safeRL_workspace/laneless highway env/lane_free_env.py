@@ -17,13 +17,14 @@ from highway_env.road.road import Road, RoadNetwork
 
 LANE_FREE_ENV_ID = "lane-free-v0"
 
-# Fixed CBF ellipse.  These are not the physical simulator body dimensions;
-# they are the minimum-area enclosing ellipse for the 3.6 m by 1.8 m
-# reference vehicle.
+# Fixed CBF ellipse.  These are not the physical simulator body dimensions.
+# Each vehicle is enclosed by the minimum-area ellipse for the 3.6 m by 1.8 m
+# reference vehicle; the pairwise barrier on the center-to-center vector uses
+# their Minkowski sum, i.e. twice those semi-axes.
 CBF_REFERENCE_VEHICLE_LENGTH_M = 3.6
 CBF_REFERENCE_VEHICLE_WIDTH_M = 1.8
-CBF_RELATIVE_ELLIPSE_A = CBF_REFERENCE_VEHICLE_LENGTH_M / math.sqrt(2.0)
-CBF_RELATIVE_ELLIPSE_B = CBF_REFERENCE_VEHICLE_WIDTH_M / math.sqrt(2.0)
+CBF_RELATIVE_ELLIPSE_A = 2.0 * CBF_REFERENCE_VEHICLE_LENGTH_M / math.sqrt(2.0)
+CBF_RELATIVE_ELLIPSE_B = 2.0 * CBF_REFERENCE_VEHICLE_WIDTH_M / math.sqrt(2.0)
 # Critical-damping first-level gain: psi_1 = h_dot + lambda_1 h.
 # This is deliberately separate from HOCBF ``k1``: for the alternative
 # (k1, k0) = (4.6, 5.29), lambda_1 = sqrt(k0) = 2.3 while k1 remains the

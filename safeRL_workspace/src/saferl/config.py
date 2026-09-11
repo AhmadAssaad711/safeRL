@@ -15,11 +15,15 @@ from typing import Any
 
 # Reference dimensions for the CBF footprint model.  The minimum-area ellipse
 # enclosing an axis-aligned rectangle has semi-axes equal to each rectangle
-# side divided by sqrt(2).
+# side divided by sqrt(2).  The pairwise barrier tests the ego-to-neighbor
+# center vector, so its semi-axes are the Minkowski sum of two such ellipses,
+# i.e. twice the single-vehicle semi-axes.
 REFERENCE_VEHICLE_LENGTH_M = 3.6
 REFERENCE_VEHICLE_WIDTH_M = 1.8
 MINIMUM_ENCLOSING_ELLIPSE_A_M = REFERENCE_VEHICLE_LENGTH_M / math.sqrt(2.0)
 MINIMUM_ENCLOSING_ELLIPSE_B_M = REFERENCE_VEHICLE_WIDTH_M / math.sqrt(2.0)
+PAIRWISE_RELATIVE_ELLIPSE_A_M = 2.0 * MINIMUM_ENCLOSING_ELLIPSE_A_M
+PAIRWISE_RELATIVE_ELLIPSE_B_M = 2.0 * MINIMUM_ENCLOSING_ELLIPSE_B_M
 
 
 @dataclass(frozen=True)
@@ -189,8 +193,8 @@ class SafetyConfig:
     k0: float = 5.29
     k1: float = 3.68
     psi1_gain: float = 2.30
-    relative_ellipse_a_m: float = MINIMUM_ENCLOSING_ELLIPSE_A_M
-    relative_ellipse_b_m: float = MINIMUM_ENCLOSING_ELLIPSE_B_M
+    relative_ellipse_a_m: float = PAIRWISE_RELATIVE_ELLIPSE_A_M
+    relative_ellipse_b_m: float = PAIRWISE_RELATIVE_ELLIPSE_B_M
     max_neighbor_constraints: int = 12
     neighbor_range_m: float = 90.0
 
@@ -275,8 +279,9 @@ class LanelessResearchConfig:
                 "reference_vehicle_width_m": REFERENCE_VEHICLE_WIDTH_M,
                 "relative_ellipse_a_m": safety.relative_ellipse_a_m,
                 "relative_ellipse_b_m": safety.relative_ellipse_b_m,
-                "full_major_axis_m": 2.0 * safety.relative_ellipse_a_m,
-                "full_minor_axis_m": 2.0 * safety.relative_ellipse_b_m,
+                # Full axes of one vehicle's enclosing ellipse (notebook parity).
+                "full_major_axis_m": 2.0 * MINIMUM_ENCLOSING_ELLIPSE_A_M,
+                "full_minor_axis_m": 2.0 * MINIMUM_ENCLOSING_ELLIPSE_B_M,
             },
             "traffic_safety": {
                 "safe_spawn": env.safe_spawn,

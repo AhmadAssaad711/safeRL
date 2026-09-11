@@ -367,8 +367,8 @@ def main() -> int:
             "geometry": {
                 "mode": "fixed_axis_aligned_relative_ellipse",
                 "implementation": "h_equals_dx_over_a_squared_plus_dy_over_b_squared_minus_one",
-                "relative_ellipse_a_m": float(3.6 / np.sqrt(2.0)),
-                "relative_ellipse_b_m": float(1.8 / np.sqrt(2.0)),
+                "relative_ellipse_a_m": float(env_config["cbf_geometry"]["relative_ellipse_a_m"]),
+                "relative_ellipse_b_m": float(env_config["cbf_geometry"]["relative_ellipse_b_m"]),
                 "environment_metadata": copy.deepcopy(env_config.get("cbf_geometry", {})),
             },
             "reset_feasibility": copy.deepcopy(env_config["cbf_reset_feasibility"]),

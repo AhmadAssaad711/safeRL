@@ -107,8 +107,11 @@ def test_batched_hocbf_geometry_matches_scalar_notebook_reference():
 
 def test_fixed_relative_position_ellipse_axes_and_derivatives():
     namespace = _notebook_namespace()
-    ellipse_a = 3.6 / np.sqrt(2.0)
-    ellipse_b = 1.8 / np.sqrt(2.0)
+    # The relative barrier's semi-axes are the Minkowski-sum (pairwise) extent
+    # of both vehicles' individual minimum-area-enclosing ellipses, i.e. twice
+    # the single-vehicle 3.6 x 1.8 m reference values.
+    ellipse_a = 2.0 * 3.6 / np.sqrt(2.0)
+    ellipse_b = 2.0 * 1.8 / np.sqrt(2.0)
     ego = {
         "x": 0.0,
         "y": 0.0,
@@ -185,16 +188,20 @@ def test_fixed_relative_position_ellipse_axes_and_derivatives():
 def test_notebook_kpi_geometry_matches_the_fixed_pairwise_barrier():
     namespace = _notebook_namespace()
     geometry_metadata = namespace["ENV_CONFIG"]["cbf_geometry"]
-    ellipse_a = 3.6 / np.sqrt(2.0)
-    ellipse_b = 1.8 / np.sqrt(2.0)
+    # The relative barrier's semi-axes are the pairwise (Minkowski-sum)
+    # extent, i.e. twice the single-vehicle 3.6 x 1.8 m reference values --
+    # equal to full_major_axis_m/full_minor_axis_m, not the single-vehicle
+    # ellipse alone.
+    ellipse_a = 2.0 * 3.6 / np.sqrt(2.0)
+    ellipse_b = 2.0 * 1.8 / np.sqrt(2.0)
     assert geometry_metadata == {
         "model": "minimum_area_enclosing_vehicle_ellipse",
         "reference_vehicle_length_m": 3.6,
         "reference_vehicle_width_m": 1.8,
         "relative_ellipse_a_m": ellipse_a,
         "relative_ellipse_b_m": ellipse_b,
-        "full_major_axis_m": 2.0 * ellipse_a,
-        "full_minor_axis_m": 2.0 * ellipse_b,
+        "full_major_axis_m": ellipse_a,
+        "full_minor_axis_m": ellipse_b,
     }
 
     ego = SimpleNamespace(
