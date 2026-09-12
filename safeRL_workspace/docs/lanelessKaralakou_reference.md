@@ -167,7 +167,7 @@ rejected when the environment is built.
 
 ### Reward variants (script-only)
 
-Three further opt-in `run_ppo_cbf_progression` flags, implemented in
+Five further opt-in `run_ppo_cbf_progression` flags, implemented in
 `src/saferl/rewards.py`, compose with either reward mode. Omitting them keeps
 the notebook behavior.
 
@@ -184,6 +184,38 @@ the notebook behavior.
   ego length behind, still within sensing range, at most once per vehicle
   per episode. The bonus value (`--overtake-bonus`) and its one-per-step
   cap are unchanged.
+- `--lateral-target field`: replaces the gap search entirely with a smooth
+  occupancy field, so there is no yes/no gap test and no fallback. Each
+  vehicle contributes `relevance * exp(-(clearance/sigma)^2)` over the road,
+  where `relevance = exp(-(|dx|/reach)^2)` uses the same closing reach as
+  `--lateral-blockers closing`, and the score adds
+  `travel_weight * ((y - y_ego)/road_width)^2` so two equally free sides
+  resolve toward the ego instead of averaging into the blocked middle. The
+  target is the softmin over the basin around the best point
+  (`--lateral-field-basin-margin`, `--lateral-field-beta`,
+  `--lateral-field-sigma-m`, `--lateral-field-travel-weight`).
+  `--lateral-field-hysteresis` charges for moving the target away from its
+  previous value, which stops two tied sides swapping; it defaults to 0,
+  which keeps the target a pure function of the state. Measured on the 500k
+  nominal policy: the target is always defined, the mean target-to-ego
+  distance is 1.83 m (1.70 m with hysteresis 2.0) against 4.15 m for the
+  notebook target, mean cy 0.180 (0.167) against 0.407, and jumps above 1 m
+  happen on 0.89% (0.51%) of steps against 2.36%. Under this target
+  `--lateral-blockers` and `--lateral-target-fallback` are inert.
+- `--lateral-blockers closing`: which vehicles can block a lateral gap.
+  The notebook counts every vehicle within 90 m ahead, so at 40 vehicles
+  about 9.2 of them subtract a 3.9 m band from an 8.4 m corridor and no
+  gap survives on 93.6% of steps (measured, 30 episodes, CBF OFF).
+  `closing` keeps a vehicle only while the gap to it shrinks inside the
+  horizon: ahead when `dx < d0 + T*max(v_ego - v_i, 0)`, behind when
+  `-dx < d0 + T*max(v_i - v_ego, 0)`, with `T` from
+  `--lateral-blocker-horizon-s` (3 s) and `d0` from
+  `--lateral-blocker-standstill-gap-m` (5 m). `closing_forward` keeps the
+  notebook's forward-only view. Measured on the 500k nominal policy, the
+  gap-found rate goes 6.4% -> 97.5% (`closing`) or 98.9%
+  (`closing_forward`), and the mean target-to-ego distance 4.15 m ->
+  2.31 m. The band geometry, the nearest-gap choice, and the fallback are
+  unchanged, and it composes with `--lateral-target-fallback`.
 - `--potential-field-weight 0`: removes the neighbour potential-field
   cost from the tracking denominator by setting wf to zero. cf is still
   computed and published as `karalakou_cf`, so runs stay comparable with

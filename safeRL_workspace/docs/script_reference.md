@@ -670,6 +670,43 @@ This is the most detailed explanatory renderer for CBF behavior.
   draw_action_arrows, and the plot functions create annotated frames that
   explain raw versus CBF-filtered action.
 
+### render_target_line.py
+
+Renders episodes in the highway-env pygame window with the reward's
+lateral target drawn as a red line across the road, plus a red tick at
+the ego's own x. The line is drawn by wrapping the `RoadGraphics.display`
+hook the lane-free environment installs, so it sits under the vehicles
+and the road itself is drawn exactly as usual. The episode runs through
+`make_evaluation_env`, so with no reward-variant flags it reproduces the
+evaluated episode on the same seed. Reward-variant flags select which
+target is drawn (`--lateral-blockers all` against `closing`), which also
+changes the target-y observation and therefore the trajectory.
+`--episodes N` walks consecutive seeds, `--fps` paces playback,
+`--save-frames N` writes PNG stills plus a summary JSON, and
+`--no-display` renders offscreen for stills only.
+
+### render_policy_terminal.py
+
+The same idea without a window: a top-down ASCII road printed one frame
+per policy step, with the lateral target as a full-width line of `=`,
+the ego as `E`, and neighbours as `#`. Columns are metres of
+longitudinal distance around the ego, rows are metres across the road.
+`--scroll` prints frames instead of redrawing in place, `--every N`
+samples steps, `--stop-on-collision` freezes on impact. Useful over a
+terminal session, or to read exact target and cost values frame by
+frame from the status line.
+
+### diagnose_reward_targets.py and replay_speed_target_counterfactual.py
+
+Read-only target diagnostics. `diagnose_reward_targets.py` rolls a saved
+policy under a given reward configuration and logs `target_y` and
+`target_speed` per step, then summarises whether each target is
+informative (its spread), smooth (its per-step jump distribution),
+reachable (its distance to the ego), and how often it binds; run it
+twice with different reward-variant flags to compare two designs before
+training on either. `replay_speed_target_counterfactual.py` replays a
+finished policy and records the speed target the reward used beside a
+feasibility-capped one computed from the same states.
 ### Remaining renderers
 
 - render_ppo_500k_nominal.py uses set_stable_native_defaults and

@@ -6,6 +6,39 @@ was verified, with the measured numbers.
 
 ---
 
+## 2026-09-12 (evening): why target_y is broken, two fixes measured, and renderers that draw it
+
+- Question from the user: the lateral target is a fallback on ~95% of steps, so why, how to fix it, is it better removed.
+- **Why it fails.** `_lateral_target_and_speed` (cell 3) counts every vehicle with `0 < dx < 90 m` as a blocker and subtracts a `W_ego + W_i + 2*0.15 = 3.9 m` band per blocker from the 8.4 m corridor. At 40 vehicles on the 380 m ring that is `39 * 90/380 = 9.2` blockers, about 36 m of band against 8.4 m of road, so the search asks for a lateral position clear of every vehicle in the next 90 m at once. Measured `zone_found` = **6.4%** (30 episodes, CBF OFF, `nom_500k` policy sha `cc2bd2a8`). The fallback then targets the *fastest blocker's y*, which is on the ego's opposite road half 55.6% of steps and jumps up to 8.28 m in one step. It is also forward-only, while the ego averages 12-14 m/s against traffic at 15-25 m/s and is mostly hit from behind or from the side.
+- Related finding: the policy sits **at the road edges 75% of steps** (47% at y in [0.9, 1.7], 30% at [8.5, 9.3]). The env clamps y and zeroes vy at the boundary with no penalty (`lane_free_env.py:2206`), so a wall is free to lean on and it halves neighbour exposure, which is what minimised `cf`. Removing `wf` removes that incentive.
+- **Option A, `--lateral-blockers closing`**: a vehicle blocks only while the gap to it is closing inside `T = 3 s` (`dx < d0 + T*max(v_ego - v_i, 0)` ahead, the mirror image behind, `d0 = 5 m`). `closing_forward` keeps the forward-only view.
+- **Option B, `--lateral-target field`**: no gap test at all. A relevance-weighted occupancy field over a 0.1 m y-grid, softmin over the basin around its best point, plus a travel term so two symmetric sides do not average into the blocked middle. `--lateral-field-hysteresis 2.0` charges for moving the target away from its previous value.
+
+  | 30 episodes, CBF OFF, same policy and seeds | notebook | closing | field | field+hyst |
+  |---|---|---|---|---|
+  | target defined | 6.4% | 97.5% | 100% | 100% |
+  | mean target-to-ego distance | 4.15 m | 2.31 m | 1.83 m | **1.70 m** |
+  | within 1 m of the ego | 11.9% | 32.0% | 43.0% | **44.5%** |
+  | mean cy | 0.407 | 0.227 | 0.180 | **0.167** |
+  | jumps above 1 m | 2.36% | 2.13% | 0.89% | **0.51%** |
+  | target frozen | 1.3% | 19.9% | 0.0% | 0.0% |
+  | on the opposite road half | 55.6% | 14.1% | 17.5% | - |
+
+  `closing_forward` reaches 98.9% gaps but degenerates: 64% of its targets collapse to the bare road centre and it is frozen on 63% of steps, because almost nothing ahead is catchable. Including the overtakers from behind is what makes the signal live.
+- Residual defect of B, found by its own test: with the field exactly symmetric about the ego the two sides are tied and the choice flip-flops, 10 times over a synthetic sweep of a leader receding from 5 m to 60 m. Hysteresis removed every flip in that sweep and in three asymmetric variants, largest step 0.08 m. It makes the target depend on its previous value, which is Markov because the target is itself observation slot 1.
+- Removing cy entirely was considered and not recommended: with neither `cf` nor `cy` nothing shapes lateral position, and wall-hugging is already the collision-minimising behaviour. It stays available as `--lateral-y-weight 0` for an ablation row.
+- Renderers, both committed entrypoints. `scripts/rendering/render_target_line.py` draws the target as a red line across the highway-env pygame window by wrapping the `RoadGraphics.display` hook the lane-free env installs; verified by pixel, a full-width red row at the target's y, after fixing a first version that stopped the line at the ring seam. `scripts/rendering/render_policy_terminal.py` prints an ASCII road per policy step with the target as a line of `=`. Both take the reward-variant flags, and both note that a variant changes observation slot 1 and therefore the trajectory. Rendered 2 episodes each for the notebook target, `closing`, `field`, and `field+hysteresis` (seeds 1100000 and 1100001, CBF OFF); stills and summaries under `artifacts/renders/target_line_*`.
+- Tests: `tests/unit/test_lateral_blocker_relevance.py` (11) and `tests/unit/test_lateral_field_target.py` (11), including the invariant that removing blockers can only create gaps, that a long horizon still drops vehicles that are pulling away, and that a large basin margin recovers the unrestricted softmin. 28 reward-variant tests pass; `check_repository_policy`: PASS.
+
+### Blocker: an intermittent worker crash is killing 500k runs
+
+- Two consecutive 500k attempts died with `Windows fatal exception: access violation` in a rollout worker inside `kpi_neighbor_and_h_metrics` (notebook cell 6, lines 320 and 330), after which the `SubprocVecEnv` hangs forever waiting on the dead worker: `nom_500k_ctr_nofield` at 328k/500k (19:09:57) and `nom_500k_ctr_nofield_r2` at 434k/500k. The same fault is in `artifacts/1MRun/nom/nom_1m.log` at a third site (cell 3 `_lateral_target_and_speed`), so it predates this week's changes; the first crash also preceded the day's edits to `rewards.py` and any diagnostic run.
+- Not memory: at the hang the 19 surviving workers held 503 MB each and the learner 1.4 GB, with 40 GB of 64 GB free.
+- Both partial runs are kept with their checkpoints (`r2` has one at 400k). Attempt 3 runs with `--checkpoint-freq 50000` so a crash costs less.
+- Next candidates: a single OpenMP runtime in the workers (torch `libiomp5md` against numpy's), and skipping the KPI wrapper during training, where its per-step metrics are not used.
+
+---
+
 ## 2026-09-12: next ladder run trains without the potential field and with a centre lateral fallback
 
 - Why: the user asked for a new run with the safety potential term removed and the no-gap lateral target moved to the road centre. The 500k nominal run showed the unshielded arm is degenerate (0/200 completion, 5.18 collisions/km) while the shielded arm is the best result so far, so the reward is being simplified toward a pure task reward: speed and lateral tracking only, with collision avoidance paid for by the collision penalty and the CBF rather than by a reward field.
