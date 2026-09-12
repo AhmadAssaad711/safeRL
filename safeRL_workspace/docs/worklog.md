@@ -6,6 +6,22 @@ was verified, with the measured numbers.
 
 ---
 
+## 2026-09-12: next ladder run trains without the potential field and with a centre lateral fallback
+
+- Why: the user asked for a new run with the safety potential term removed and the no-gap lateral target moved to the road centre. The 500k nominal run showed the unshielded arm is degenerate (0/200 completion, 5.18 collisions/km) while the shielded arm is the best result so far, so the reward is being simplified toward a pure task reward: speed and lateral tracking only, with collision avoidance paid for by the collision penalty and the CBF rather than by a reward field.
+- Change: notebook cell 11 defines `PPO_1M_REWARD_VARIANT_ARGS = ["--lateral-target-fallback", "center", "--potential-field-weight", "0"]` and appends it to every policy launch ahead of each variant's `extra_args`. Both the launch print and the "ladder prepared" print now echo it, and `reward_variant_summary` writes both into every `run_config.json`.
+  - `--lateral-target-fallback center`: cy targets the road centre (5.1 m) when no free gap exists ahead, which is about 95% of steps at 40 vehicles. Committed earlier in `7a578a2`; this is the first run to launch with it.
+  - `--potential-field-weight 0`: drops `wf * cf` from the reciprocal denominator, leaving `eps / (eps + wx*cx + wy*cy)`. cf is still computed and published as `karalakou_cf`, so this run stays comparable with the ones that scored it. Nothing else in the reward changes: progress, jerk, collision penalty, and overtake bonus are untouched, and `REWARD_CONFIG` in the notebook still has `wf = 1.0`.
+- Files: `notebooks/lanelessKaralakou.ipynb` (cell 11), `src/saferl/rewards.py` (flag plus module docstring), `docs/lanelessKaralakou_reference.md` (reward-variants section and launch guard), `tests/unit/test_potential_field_weight.py`, `tests/protocol/test_ppo_cbf_progression.py`.
+- Verification, no training launched:
+  - `tests/unit/test_potential_field_weight.py`: 6 passed. Two of them roll the real notebook env at 40 vehicles and check, step by step, that the wf=0 reward equals `eps/(eps + wx*cx + wy*cy) + progress - jerk + event` while cf is unchanged from the wf=1 rollout on the same seed (cf peaks above 0.05 there, so the term did bind), and that no-gap steps target 5.1 m in both `karalakou_target_y` and observation slot 1.
+  - Reward, fallback, linear-mode, overtake, script-catalog, and repository-policy tests: 35 passed. `python -m scripts.ops.check_repository_policy`: PASS.
+  - `run_ppo_cbf_progression --help` lists both flags, so the notebook command parses.
+  - Known pre-existing failure, unrelated: `test_notebook_primary_ladder_is_ppo_first_and_streams_inline` still asserts `PPO_1M_RUN_TRAINING = bool`, while the notebook hardcodes `True` for the relaunch (`a6b9db7`). The four new assertions in that test pass.
+- Not done: nothing was trained. The run is still to be launched from cell 11, or with `--timesteps 500000` and its own output directory for a 500k comparison against `artifacts/1MRun/nom_500k/`.
+
+---
+
 ## 2026-09-12: 500k nominal PPO at the canonical 40 vehicles — best shielded result so far, unshielded baseline unchanged
 
 - Why: the user reframed the study around **two valid RL-only baselines** (B1a nominal, B1b the same reward plus an HOCBF shaping term, both unshielded), then B2 = filter in the loop + correction term, then B3 = + differentiable term. A nominal policy trained at the canonical density with the new gains is the first rung and the calibration source for B1b's frozen `--hocbf-psi-scale`.

@@ -1020,6 +1020,11 @@ def test_notebook_primary_ladder_is_ppo_first_and_streams_inline():
     assert '"--post-train-eval-episodes", str(PPO_1M_POST_TRAIN_EVAL_EPISODES)' in launcher
     assert '"--task-distance-m", str(PPO_1M_TASK_DISTANCE_M)' in launcher
     assert '"--post-train-evaluate-reused"' in launcher
+    # This ladder trains on the notebook reward with two documented overrides.
+    assert "PPO_1M_REWARD_VARIANT_ARGS = [" in launcher
+    assert '"--lateral-target-fallback", "center"' in launcher
+    assert '"--potential-field-weight", "0"' in launcher
+    assert 'list(PPO_1M_REWARD_VARIANT_ARGS) + list(spec["extra_args"])' in launcher
     assert "subprocess.Popen" in launcher
     assert "stdout=subprocess.PIPE" in launcher
     assert "stderr=subprocess.STDOUT" in launcher

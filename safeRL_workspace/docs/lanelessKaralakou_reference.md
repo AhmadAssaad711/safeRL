@@ -165,9 +165,9 @@ karalakou_event_reward, and karalakou_reciprocal_mode_reward (the total the
 reciprocal mode would have returned). Any other `reward_mode` value is
 rejected when the environment is built.
 
-### Lateral target fallback and overtake detection (script-only)
+### Reward variants (script-only)
 
-Two further opt-in `run_ppo_cbf_progression` flags, implemented in
+Three further opt-in `run_ppo_cbf_progression` flags, implemented in
 `src/saferl/rewards.py`, compose with either reward mode. Omitting them keeps
 the notebook behavior.
 
@@ -184,6 +184,12 @@ the notebook behavior.
   ego length behind, still within sensing range, at most once per vehicle
   per episode. The bonus value (`--overtake-bonus`) and its one-per-step
   cap are unchanged.
+- `--potential-field-weight 0`: removes the neighbour potential-field
+  cost from the tracking denominator by setting wf to zero. cf is still
+  computed and published as `karalakou_cf`, so runs stay comparable with
+  runs that scored it. The reciprocal term then tracks speed and lateral
+  position only, and keeping clear of neighbours is paid for by the
+  collision penalty and, when it is in the loop, the CBF.
 
 The wrapper publishes reward components under the karalakou_ prefix in info.
 Important fields include karalakou_cf, karalakou_target_y,
@@ -253,6 +259,13 @@ ladder: `PPO_1M_RUN_TRAINING = True` and
 `PPO_1M_FORCE_RETRAIN = True`. Set both to `False` before a
 documentation-only or inspection pass. The same cell also requires CUDA when
 training is enabled through `PPO_1M_REQUIRE_CUDA = True`.
+
+The same cell defines `PPO_1M_REWARD_VARIANT_ARGS`, appended to every
+policy launch, so this ladder trains on a reward that differs from the
+notebook `REWARD_CONFIG` in exactly two ways:
+`--lateral-target-fallback center` and `--potential-field-weight 0`
+(see "Reward variants" above). Each run_config.json records both through
+`reward_variant_summary`.
 
 ## CBF geometry and filtering
 
