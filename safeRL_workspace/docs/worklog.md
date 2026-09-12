@@ -6,6 +6,43 @@ was verified, with the measured numbers.
 
 ---
 
+## 2026-09-12: 500k nominal PPO at the canonical 40 vehicles — best shielded result so far, unshielded baseline unchanged
+
+- Why: the user reframed the study around **two valid RL-only baselines** (B1a nominal, B1b the same reward plus an HOCBF shaping term, both unshielded), then B2 = filter in the loop + correction term, then B3 = + differentiable term. A nominal policy trained at the canonical density with the new gains is the first rung and the calibration source for B1b's frozen `--hocbf-psi-scale`.
+- Launch: 17:22:47, `scripts.training.run_ppo_cbf_progression` with cell 11's nominal flags, `--timesteps 500000`, output `artifacts/1MRun/nom_500k/`. Reward left **exactly as the notebook has it** at the user's request: `reward_mode: reciprocal`, `lateral_target_fallback: fastest_blocker`, `overtake_detection: step`. Model sha `cc2bd2a8…`.
+- Speed: training 19.2 min for 500k = **433 t/s**, above the 400 t/s nominal baseline. 23 python processes (1 learner + 20 workers + the user's 2 kernels), confirming 20 workers. Evaluation 6.5 min for 200+200.
+
+  | KPI | CBF OFF | CBF ON |
+  |---|---|---|
+  | Distance-based completion | **0.000** | **0.805** (0.080) |
+  | Ego collisions / km | 5.181 (1.056) | **0.231** (0.104) |
+  | Episode length (steps) | 288 | 1188 |
+  | Abs speed error (m/s) | 3.05 | 2.10 |
+  | Lateral tracking error (m) | 4.27 | 4.62 |
+  | QP failure rate | – | 0.075 |
+  | Intervention rate | – | 0.849 |
+  | Mean jerk norm | 1.52 | 4.13 |
+
+- **CBF ON is the best result the project has produced.** Against the 200-episode gain confirmation of the same (0.5, 8) cell, which used the old 55-vehicle policy evaluated at 40: collisions/km 0.50 → **0.231**, completion 60.5% → **80.5%**. Training at the canonical density is worth roughly another halving on top of the gain fix.
+- **CBF OFF is unchanged from the old policy**: 5.18 collisions/km against 5.34 for the 55-vehicle policy evaluated at 40, and **0 of 200 episodes complete**. 500k of training did not make the unshielded policy meaningfully safer.
+- Consequence for the ladder: the OFF→ON gap is now 0% → 80.5% completion and 22× on collisions/km, i.e. the filter is doing essentially all of the safety work. **Completion is degenerate at 0 on the unshielded arm**, so B1a vs B1b cannot be ranked on the primary endpoint; they must be ranked on collisions/km and mean distance.
+- Not converged at 500k: mean episode length rose 202 → 256 and mean return 61.3 → 76.1 from the first 100k to the last 200k. One seed only.
+
+## 2026-09-12: counterfactual replay of the reward's speed target (read-only; nothing changed)
+
+- Entrypoint: new `scripts/evaluation/replay_speed_target_counterfactual.py` (uncommitted). It replays a finished policy deterministically and, at each policy step, records the target the reward actually used beside a **feasibility-capped** target computed from the same post-step state. Executed actions are the run's own, so the trajectories are real.
+- Proposed rule, `v_nominal = 20` at the user's choice: `v_allow_i = max((dx_i − 5)/1.5, 0)`; lateral relevance `w_i = sigmoid(−(|dy_i| − ½(W_ego+W_i))/0.45)`; **faded allowance** `v_eff_i = w_i·v_allow_i + (1−w_i)·v_nominal`; `v_target = min(v_nominal, min_i v_eff_i)`. Also `cx = |v_ego − v_target| / v_nominal`, not over the live target.
+- Two defects the replay caught before any training, both now fixed in the rule above:
+  1. Dividing cx by a moving target diverges — at `v_target ≈ 3 m/s` it gave cx 1.31 against the real 0.28.
+  2. Weighting from **outside** the aggregation fails: a car 2 m ahead but laterally clear has `v_allow = 0` and softmin weight `e^(β·20) ≈ 5e8`, which pulled the mean target to 8.7 against a true minimum of 13.7. The lateral weight must act inside each allowance. The minimum is continuous because the cap only binds below `dx = 5 + 1.5·20 = 35 m`, well inside the 90 m sensing range.
+- Output `artifacts/1MRun/speed_target_replay_20260912/`, 30 episodes / 6,146 steps on the `nom_orig_0911_backup` policy at 40 vehicles, CBF OFF.
+  - **The ego is below its 16 m/s target on 87% of steps**, and the cap binds below 20 on 72% (14.5 m/s when binding). The fixed target acts as a near-constant tax for a deficit traffic mostly forces. `zone_found` 4.6%.
+  - Mean ego speed 12.25 against a feasible 15.98: the policy already **under-drives** what the gaps allow, so cx is currently mostly an offset, not a directional force. This weakens the earlier claim that cx pays the ego to press into leaders — that is the minority leader-collision mode, not the average behaviour.
+  - **The hypothesis that the cap would catch the collisions failed.** Over the last 10 steps before impact the ego is *further below* the proposed target (−7.47) than its episode mean (−3.31), and below the fixed target by −6.30. Most collisions are rear-ended-from-behind or side contacts with **no leader in the corridor**, so the cap returns the full 20 and advises accelerating.
+- Conclusion: worth doing for MDP hygiene — it removes an unpayable penalty on 87% of steps and turns observation slot 4 from a constant into a live feature — but it is **not** a collision fix, and should not be launched as one. Nothing in the reward has been changed.
+
+---
+
 ## 2026-09-11: adopt (c1, c2) = (0.5, 8) and 40 vehicles for the final results
 
 - Change: `SafetyConfig` and notebook cell 44 set `k0 = 4.0`, `k1 = 8.5`. `EnvironmentConfig`, notebook cell 5, and the docs set `vehicles_count = 40`. Notebook cell 95's fallback defaults, the cell 0 intro, and `docs/script_reference.md` no longer name 5.29/3.68 or (4.6, 5.29).
