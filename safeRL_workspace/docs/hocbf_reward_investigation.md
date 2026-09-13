@@ -255,3 +255,147 @@ The surviving failures are still diagnostic:
 Next: implement the candidate as a **new** variant (leaving
 `ppo_hocbf_reward_raw` untouched so the completed 21-run study stays valid),
 then the first paired 250k trial against the existing A1 nominal control.
+
+### 2026-09-13 23:40 - implementation
+
+New variant `ppo_hocbf_dense_raw` (commit 0e02b5e), `execution_mode="box"` like
+B1 so it remains a pure reward-shaping treatment with no CBF in training:
+
+- `cbf_ray_mask.build_cbf_action_constraints` now also returns `barrier_h` and
+  `barrier_h_dot` (vehicles plus both road boundaries). These were already
+  computed and discarded; only the minimum was kept.
+- `CBFContextPhysicalActionWrapper._dense_hocbf_penalty` implements
+  `lambda * sum_i sigmoid(-(h_i + tau*h_dot_i)/w)`.
+- The penalty is evaluated on the constraint system **after** the step, so it
+  credits the action that produced the state rather than the state the action
+  was taken from. That system was already being built for the next
+  observation, so this costs no extra geometry.
+- Evaluation environments leave `lambda=0`, so post-training KPIs measure
+  driving and safety only and stay directly comparable with every other
+  variant's numbers, including the completed study's.
+- New CLI: `--dense-hocbf-lambda` (default 0.154), `--dense-hocbf-tau` (0.5),
+  `--dense-hocbf-w` (0.25). Unavailable `h_dot` raises rather than silently
+  zeroing the safety term.
+
+Smoke test in the real environment on the A1 checkpoint, 400 steps:
+
+| lambda | penalty mean | p95 | max | share of reward |
+| --- | --- | --- | --- | --- |
+| 0.0 | 0.0000 | 0.0000 | 0.0000 | 0.000 |
+| 0.154 | 0.0729 | 0.2310 | 0.2955 | 0.225 |
+
+Clean off-switch at lambda=0, and at 0.154 the term is 22.5% of the reward with
+a bounded maximum of 0.30 - the intended regime. A 4,000-step end-to-end
+training run completed and produced a valid manifest and KPI table, confirming
+the variant works through the worker/vectorised path, not just in-process.
+
+Launcher bugs hit and fixed on the way (all mine, none in the repo): PowerShell
+`-File` does not parse array parameters, native-argument quote stripping
+mangled `--env-config-json`, and `Out-File -Encoding utf8` on PowerShell 5.1
+writes a BOM that `json.loads` rejects. Switched to a `--env-config-file`
+written BOM-free.
+
+### 2026-09-13 23:45 - trials T1-T3 launched
+
+Seed 307, 250k, everything else identical to the study contract. Control is the
+existing A1 nominal seed 307. Sweeping only magnitude, since the shape is what
+the offline analysis already selected:
+
+| trial | lambda | expected share |
+| --- | --- | --- |
+| T1 | 0.154 | ~22% |
+| T2 | 0.30 | ~44% |
+| T3 | 0.08 | ~12% |
+
+### 2026-09-14 00:10 - T1 result (lambda=0.154, seed 307)
+
+All three columns are seed 307 only, 200+200 post-training episodes, plus a
+12-episode behaviour probe. Bold marks an improvement over the A1 control.
+
+**CBF-OFF (raw) - the primary target:**
+
+| KPI | A1 nominal | B1 hocbf | T1 dense |
+| --- | --- | --- | --- |
+| Ego collisions / km | 7.679 | 7.050 | **6.247** |
+| Episode return | 121.806 | 117.049 | **141.761** |
+| Mean lateral tracking err (m) | 2.102 | 2.167 | **1.621** |
+| Abs speed error (m/s) | 5.105 | 3.132 | **3.087** |
+| Mean jerk norm | 1.112 | 1.306 | 2.005 |
+
+**CBF-ON:**
+
+| KPI | A1 nominal | B1 hocbf | T1 dense |
+| --- | --- | --- | --- |
+| Completion | 0.785 | 0.795 | **0.805** |
+| Ego collisions / km | 0.251 | 0.242 | **0.233** |
+| Episode return | 779.439 | 778.501 | **813.790** |
+| Mean lateral tracking err (m) | 2.083 | 2.046 | **1.494** |
+| Intervention rate | 0.957 | 0.895 | **0.757** |
+| Minimum h | -0.427 | -0.444 | **-0.360** |
+| Mean jerk norm | 4.173 | 4.323 | 4.612 |
+
+**Behaviour guardrails (12-episode probe):**
+
+| signal | A1 nominal | B1 hocbf | T1 dense |
+| --- | --- | --- | --- |
+| ego y median (centre = 5.1) | 6.140 | **9.300** | **5.732** |
+| steps within 0.5 m of an edge | 70.5% | 83.4% | **59.7%** |
+| mean speed (target 16.0) | 12.575 | 14.146 | **15.273** |
+| speed deficit | 3.425 | 1.854 | **0.727** |
+
+Reading:
+
+- **Raw collisions/km fall 18.6%** (7.679 -> 6.247), just under the 20% bar I
+  set, and in the right direction for the first configuration tried. B1 managed
+  8.2% on the same seed.
+- **The shield intervenes far less** (0.957 -> 0.757) and `min_h` improves
+  (-0.427 -> -0.360), i.e. the policy is making choices that need less
+  correcting, which is exactly the effect the term was supposed to have and
+  never did.
+- **Both named degeneracies moved the right way, not the wrong way.** B1's
+  median y is pinned at **9.300**, the road edge itself - the edge-hugging is
+  even starker per-seed than the means suggested. T1 sits at 5.732 against a
+  centre of 5.1 and spends *less* time near an edge than the nominal (59.7% vs
+  70.5%). And it does not crawl: mean speed 15.27 of a 16.0 target, the best of
+  the three, with the speed deficit cut from 3.43 to 0.73.
+- Driving quality improves rather than degrades: lateral tracking error 2.08 ->
+  1.49 and return 779 -> 814 with the shield on.
+
+**The one regression is jerk**: 4.173 -> 4.612 with the shield on (+11%) and
+1.112 -> 2.005 raw (+80%). The term buys its safety partly with more reactive
+steering. Worth watching in the lambda sweep - if jerk scales with lambda while
+the safety gain saturates, a lower lambda is the better operating point.
+
+Single seed, so this is a candidate signal, not a confirmed result. Seeds 308
+and 309 required before believing it.
+
+### 2026-09-14 00:40 - lambda sweep complete (all seed 307)
+
+| lambda | raw coll/km | CBF-ON completion | CBF-ON coll/km | CBF-ON return | intervention | CBF-ON jerk | ego y median | mean speed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 (A1 control) | 7.679 | 0.785 | 0.251 | 779.4 | 0.957 | 4.173 | 6.14 | 12.58 |
+| 0.08 | 6.336 | 0.765 | 0.282 | 781.6 | 0.807 | 4.289 | **1.74** | 14.96 |
+| **0.154** | **6.247** | **0.805** | **0.233** | **813.8** | **0.757** | 4.612 | **5.73** | 15.27 |
+| 0.30 | 7.663 | 0.740 | 0.310 | 748.7 | 0.895 | 4.820 | **9.30** | 16.96 |
+
+The response is an inverted U, not monotone, and 0.154 is the optimum on
+essentially every axis. That shape is itself the interesting finding:
+
+- **At lambda=0.30 the safety benefit disappears entirely** (7.663 raw
+  collisions/km, statistically the control's 7.679) *and* the degeneracies come
+  back hard: median y pinned at **9.30**, the road edge, and mean speed 16.96
+  against a 16.0 target, i.e. it now speeds. Over-weighting the term makes the
+  policy game it instead of drive well.
+- **Why it can still be gamed at high lambda**: the aggregation is a *sum* over
+  barriers, and each barrier contributes at most 1.0. Moving to the edge sheds
+  several vehicle barriers while adding at most one boundary barrier, so in
+  dense traffic the trade is net-favourable once lambda is large enough to
+  dominate the task reward. The boundary term cannot outweigh several shed
+  neighbours. A max/softmax aggregation, or boundary barriers weighted above
+  vehicle ones, would close this; worth testing if time allows.
+- lambda=0.08 gets most of the raw-collision benefit (6.336) with less jerk
+  (4.289) but is worse with the shield on across completion, collisions,
+  tracking and intervention. It also drifts to the *other* edge (median y 1.74).
+
+Operating point selected: **lambda=0.154, tau=0.5, w=0.25**. Confirmation runs
+on seeds 308 and 309 launched at 00:38.
