@@ -498,3 +498,125 @@ of +-0.700, so the estimate is the weakest part of the result. Rather than
 sweep further hyperparameters, remaining time goes to seeds 310 and 311 for
 both the dense variant **and** matched `ppo_nominal` controls (the completed
 study only has controls at 307-309), giving a five-seed paired comparison.
+
+### 2026-09-14 02:35 - FIVE-SEED RESULT: the primary hypothesis does not hold
+
+Two more paired seeds changed the headline. Reporting this prominently because
+it contradicts what I wrote an hour ago.
+
+**Primary metric - raw (CBF-OFF) collisions/km:**
+
+| seed | control | dense | change |
+| --- | --- | --- | --- |
+| 307 | 7.679 | 6.247 | -18.7% |
+| 308 | 7.030 | 7.083 | +0.7% |
+| 309 | 8.729 | 6.729 | -22.9% |
+| 310 | 6.129 | 5.371 | -12.4% |
+| 311 | 6.637 | 8.155 | **+22.9%** |
+| **mean** | **7.241** | **6.717** | **-7.2%** |
+
+Paired delta -0.524 +- 1.375, **3 of 5 seeds improved, paired t = -0.85**,
+nowhere near significance at n=5. Seed 311 is 23% *worse*.
+
+**The -14.4% from three seeds was seed luck.** The two new seeds moved the
+estimate from -14.4% to -7.2% and the improvement count from 2/3 to 3/5. On its
+stated objective - making the *unshielded* policy safer - this term is not
+demonstrated to work. I set >=20% as the bar before running anything; the
+result is -7.2% and not statistically distinguishable from zero.
+
+**But five of five seeds agree on something else.** Every shield-side metric
+improves on every single seed:
+
+| KPI (CBF-ON unless noted) | control | dense | delta | seeds better |
+| --- | --- | --- | --- | --- |
+| Ego collisions / km | 0.304 | 0.240 | **-21.1%** | **5/5** |
+| Distance completion rate | 0.747 | 0.798 | **+6.8%** | **5/5** |
+| Episode return | 771.5 | 818.3 | **+6.1%** | **5/5** |
+| Mean lateral tracking err (m) | 1.917 | 1.444 | **-24.7%** | **5/5** |
+| **Intervention rate** | 0.846 | 0.686 | **-19.0%** | **5/5** |
+| Mean lateral tracking err, raw | 1.933 | 1.553 | -19.7% | **5/5** |
+| Abs speed error (m/s) | 2.330 | 2.177 | -6.6% | 4/5 |
+| **Mean jerk norm** | 4.504 | 4.820 | **+7.0%** | **1/5** |
+| Minimum h | -0.417 | -0.425 | +1.7% | 2/5 |
+
+Unanimity across five seeds on six separate metrics is not noise. So the honest
+statement of what this term does:
+
+> It does not make the raw policy meaningfully less collision-prone. It makes
+> the policy **substantially more compatible with the shield** - 21% fewer
+> collisions and 19% less intervention *when shielded*, with 25% better lateral
+> tracking and higher completion and return, consistently on every seed.
+
+That is a different claim from the one the term was designed around, and
+arguably the more useful one: CBF-ON is the deployed configuration, and a
+policy that needs the shield to rescue it 19% less often while completing more
+often is a better policy to deploy. It is not, however, evidence that HOCBF
+reward shaping makes a policy independently safe.
+
+**Guardrails over five seeds.**
+
+Sideline hugging - improved, 4 of 5 seeds (fraction of steps within 0.5 m of an
+edge): control 0.657 -> dense 0.462. The old term's pathology (median ego y
+pinned at 9.30, the road edge) is gone.
+
+Crawling - **a real, bimodal failure**:
+
+| seed | control speed | dense speed | delta |
+| --- | --- | --- | --- |
+| 307 | 12.58 | 15.27 | +2.70 |
+| 308 | 15.57 | 15.74 | +0.17 |
+| 309 | 13.07 | 11.02 | **-2.06** |
+| 310 | 14.00 | 16.13 | +2.12 |
+| 311 | 12.55 | **9.45** | **-3.10** |
+| mean | 13.55 | 13.52 | -0.03 |
+
+Mean speed is flat, which hides the actual behaviour: three seeds speed up
+toward the 16.0 target, and **two seeds collapse into a slow, over-cautious
+mode** - seed 311 at 9.45 m/s with a 6.55 m/s deficit. Seed 311 is also the
+seed whose raw collisions got *worse*, so on that seed the term produced a
+policy that is both slower and less safe unshielded. Reporting the mean alone
+would have concealed this entirely.
+
+Jerk is a genuine regression at five seeds (+7.0%, 4 of 5 seeds worse). My
+three-seed reading that it was "flat, i.e. noise" was wrong.
+
+### Conclusion and what I would do next
+
+**What was wrong with the original term** (all measured, not inferred): it was
+~1% of the reward signal; its psi2 basis ranks pre-collision states at AUC 0.72
+against 0.95 for a half-second predicted barrier; it is non-monotone in
+distance (a vehicle at 4 m scores *less* than the same vehicle at 8 m); and the
+policy it produced hugged the sideline because thinning the neighbour set was
+the cheapest way to reduce it. Critically, **none of this is reachable by
+tuning lambda, psi-scale or margin** - all three are monotone rescalings that
+cannot change the ranking.
+
+**What the replacement achieves**: consistent, five-of-five-seed improvements in
+shielded operation and tracking, and it removes the edge-hugging. It does not
+deliver the unshielded safety gain it was aimed at.
+
+**Open problems, in the order I would attack them:**
+
+1. **The crawling bimodality.** Two of five seeds collapse to a slow mode.
+   Slowing genuinely reduces closing rates, so a rate-aware term rewards it;
+   the task reward is supposed to counterbalance and on two seeds it loses.
+   Worth trying: make the term insensitive to closing that is caused by the ego
+   being slow rather than by the gap shrinking dangerously.
+2. **The sum aggregation is farmable.** At lambda=0.30 edge-hugging returned
+   because moving to the edge sheds several vehicle barriers while adding at
+   most one boundary barrier. A max-style aggregation would fix that, but I
+   measured that the obvious form (`sigmoid` of the worst predicted barrier) has
+   a median of 0.5, i.e. a large *constant* per-step tax - and in a
+   collision-terminating episode a constant penalty rewards ending the episode
+   sooner. It needs an offset/threshold so the term is near zero in safe states
+   before it is worth training. I did not have time to design and validate that
+   properly, and would rather leave it than ship an untested reward shape.
+3. **Seed count.** Five seeds still leaves the primary metric indeterminate
+   (t = -0.85). If the raw-safety claim matters, it needs ~10 seeds, not more
+   hyperparameter sweeps.
+
+**Method note that paid off:** the offline analysis ranked tau=0.5 as best
+before any training, and the trained runs agreed. Characterising the term on a
+labelled rollout trace costs seconds and predicted the right hyperparameter;
+the 250k runs were then needed only to confirm it and to expose the behavioural
+failures (crawling) that a static score cannot show.
