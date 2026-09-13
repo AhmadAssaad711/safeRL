@@ -6,6 +6,37 @@ was verified, with the measured numbers.
 
 ---
 
+## 2026-09-13: the worker "access violation" is machine instability, not a bug in the code
+
+- Question from the user: why does the native worker access violation keep happening.
+- **The machine blue-screened at 09:47:02 today.** `Win32_OperatingSystem.LastBootUpTime` is 09:47:02, and System event 1001 records bugcheck `0x1E` at 09:47:19 with a 3.83 GB `C:\WINDOWS\MEMORY.DMP`. That, not a dead terminal, is what ended the 09:41 ladder attempt and the supervisor with it.
+- **13 bugchecks in 30 days**, plus 45 Kernel-Power 41 and 46 EventLog 6008 unclean shutdowns: `0x50` PAGE_FAULT_IN_NONPAGED_AREA x4, `0x3B` SYSTEM_SERVICE_EXCEPTION with `c000001d` ILLEGAL_INSTRUCTION x4, `0x1E` x2, `0x20001` HYPERVISOR_ERROR x2, `0x139` x1. Illegal instructions and bad page faults in kernel mode across unrelated codepaths are a hardware-instability signature, not a driver or application bug.
+- Machine: HP Z2 Tower G9, **Intel Core i9-14900** (Family 6 Model 183 Stepping 1, Raptor Lake Refresh), BIOS U50 03.05.01 of 2025-08-25, **microcode 0x12F**, 2 x 32 GB Kingston DDR5-5600 running at 4400. The Vmin-shift mitigation microcode is already installed, so it prevents further degradation but cannot repair a part that has already degraded. Also 187 WHEA-Logger id 17 corrected PCIe AER errors in 30 days from `PCI\VEN_144D&DEV_A80A` (the Samsung NVMe).
+- Application side, 6 python crashes in 8 days: 4 faulting in `_multiarray_umath.cp39-win_amd64.pyd`, one in `python39.dll` at offset 0 with event name **BEX64** (a DEP/buffer-overrun failure), one in an `unknown` module at a heap address. Different faulting modules and a corrupted function pointer mean memory corruption, not a numpy API misuse.
+- Software causes ruled out, in order of what would have been cheapest to fix:
+  - **numpy install**: all 937 files verified against `numpy-1.26.4.dist-info/RECORD`; only a `.pyc` differs. (Site-packages does hold orphaned `~umpy`, `~-mpy` directories and a loose wheel from interrupted pip runs; dead weight, not loaded.)
+  - **The QP solver**: runs 1 and 2 train `ppo_nominal` with `project_inputs=False`, which takes the `_box_record` path at `scripts/common/ppo_cbf_env.py:762`; osqp is never called on those steps, and they crash anyway.
+  - **Unsafe buffers in our code**: no `stride_tricks`, `frombuffer`, `ctypes`, `shared_memory` or `np.ndarray(...)` anywhere in the project or the notebook, so nothing in Python can corrupt the heap directly.
+  - **The environment itself**: scratchpad `stress_env.py` steps the real env in a standalone process. 16 processes on the reward+KPI env did **444k steps, 0 faults**; the full worker stack (`_make_ppo_worker_env`: reward variant, observation variant, CBF context, KPI, protocol, Monitor) did **218k steps, 0 faults**. The real run faults every 25-40k transitions, so that is roughly 20x the expected failure point with nothing.
+  - A 150k-step rerun of the real 20-worker configuration under `PYTHONMALLOC=debug` reached 187 episodes with no allocator diagnostic before it was stopped; inconclusive, and worth repeating if the fault survives the hardware work.
+- All five historical crash sites (`_lateral_target_and_speed` cell-3:296 and :310, `_augment_observation` cell-3:78, `kpi_neighbor_and_h_metrics` cell-6:320 and :330) are loops reading `vehicle.position` while iterating `road.vehicles`, i.e. the hottest lines in the step. A random corruption lands there because that is where the process spends its time, which is why the Python line in the traceback keeps moving.
+- What to do: treat it as a hardware fault. Check HP for a BIOS newer than 03.05.01, run Windows Memory Diagnostic or memtest86 overnight on the two Kingston modules, and if the bugchecks continue, raise it with HP/Intel under the extended 13th/14th-gen warranty. Until then, keep training checkpointed at 25k with the auto-resume driver, which loses only the steps since the last checkpoint when the machine goes down.
+
+---
+
+## 2026-09-13: one foreground command that runs the four lateral-target trainings in order
+
+- Driver: `scripts/ops/run_lateral_target_ladder.ps1`, committed, run from the user's own cmd window so it is not owned by a Claude session. Sequential, one run at a time, **250k steps each** (`-Timesteps`), outputs under `%LOCALAPPDATA%\Temp\saferl_runs\lateral_ladder_250k\<label>` (`-OutBase`), log `LADDER.log`. It resolves the project root from its own location and holds one lock per output base, so a second ladder cannot start on top of a live one.
+- Runs: `1_n_ctr` (ppo_nominal, `--lateral-target gap --lateral-target-fallback center`), `2_n_field` (ppo_nominal, `--lateral-target field`), `3_h_noy` (`--variants ppo_nominal ppo_hocbf_reward_raw --lateral-y-weight 0`), `4_h_field` (ppo_hocbf_reward_raw, `--lateral-target field`). Shared base: mtm, 40 vehicles, 100/20/20, Q1_stable, 20 envs x 1000, seed 307, `--potential-field-weight 0`, `--checkpoint-freq 25000`, 200+200 post-train eval from seed 1100000.
+- Two corrections to the earlier supervisor, both of which would have failed on arrival or corrupted the comparison:
+  1. Runs 3 and 4 had no psi scale. Omitting `--hocbf-psi-scale` requires `ppo_nominal` in `--variants` (`run_ppo_cbf_progression.py:4555`), so run 3 now trains its own wy=0 nominal as the fixed calibration policy and writes `hocbf_scale_calibration.json`. The driver reads `selected_psi_scale` from it and passes it to run 4 explicitly, so both HOCBF runs share one normalization. Run 4 is skipped, not miscalibrated, if that file is missing.
+  2. The completion gate tested only that `post_train_200ep_kpis.csv` exists. That file is upserted per variant at the output-dir root, so run 3 would have handed over to run 4 after its *nominal* evaluation and run two trainings concurrently. The gate now requires every variant of the run to appear in the CSV.
+- Also changed: `--force-retrain` is added only when the run directory holds no checkpoint, so a relaunch resumes instead of discarding progress (`1_n_ctr` keeps its 50k), and `MaxAttemptsPerRun` is 100.
+- Verification: run 4's config (HOCBF + field target + explicit scale) had never been executed; smoked at 400 steps / 2 envs, exit clean, signature shows `hocbf_psi_scale: 652.34`, `lateral_target: field`. Run 3's exact combination was smoked in the previous session (`smoke_hocbf`, scale landed in `selected_psi_scale`). Driver parses clean; helper functions dry-tested (a finished run dir reads as complete, a partial one does not, the JSON scale parses to full precision, the quoting survives a path with spaces).
+- Open risk, not fixed: the native worker `access violation` in `_lateral_target_and_speed` is currently firing every ~25-40k steps (three faults in the 09:41-09:46 attempt on `1_n_ctr`). The driver detects it and resumes from the newest 25k checkpoint, so it costs about a minute of relaunch each time, roughly +20 min per 500k run. The root cause is still open (worklog 2026-09-12: single OpenMP runtime in the workers, or skipping the KPI wrapper during training).
+
+---
+
 ## 2026-09-12 (evening): why target_y is broken, two fixes measured, and renderers that draw it
 
 - Question from the user: the lateral target is a fallback on ~95% of steps, so why, how to fix it, is it better removed.
