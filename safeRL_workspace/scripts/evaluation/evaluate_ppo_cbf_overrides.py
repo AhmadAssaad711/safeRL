@@ -111,7 +111,10 @@ def load_source_run(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def build_namespace(
-    project_root: Path, run_config: dict[str, Any], gains: Optional[dict[str, float]] = None
+    project_root: Path,
+    run_config: dict[str, Any],
+    gains: Optional[dict[str, float]] = None,
+    max_neighbor_constraints: Optional[int] = None,
 ) -> dict[str, Any]:
     """Execute the notebook definitions and install the run's CBF settings.
 
@@ -131,6 +134,8 @@ def build_namespace(
     namespace.update(copy.deepcopy(run_cbf))
     if gains:
         namespace.update(gains)
+    if max_neighbor_constraints is not None:
+        namespace["CBF_MAX_NEIGHBOR_CONSTRAINTS"] = int(max_neighbor_constraints)
     return namespace
 
 
@@ -158,6 +163,12 @@ def add_override_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project-root", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, required=True, help="Ladder seed directory with run_config.json and model_final.zip.")
     parser.add_argument("--vehicles", type=int, default=None)
+    parser.add_argument(
+        "--max-neighbor-constraints",
+        type=int,
+        default=None,
+        help="Limit the CBF to this many nearest in-range vehicle constraints.",
+    )
     parser.add_argument("--hz", type=int, default=None, help="Set physics = policy = CBF frequency.")
     parser.add_argument("--spawn-psi1-gain", type=float, default=None)
     parser.add_argument(
@@ -201,14 +212,29 @@ def main() -> int:
     parser.add_argument("--episodes", type=int, default=DEFAULT_EPISODES)
     parser.add_argument("--c1", type=float, default=None)
     parser.add_argument("--c2", type=float, default=None)
+    parser.add_argument("--k0", type=float, default=None, help="Override the HOCBF h coefficient without changing psi1 gain.")
+    parser.add_argument("--k1", type=float, default=None, help="Override the HOCBF h-dot coefficient without changing psi1 gain.")
     args = parser.parse_args()
     if (args.c1 is None) != (args.c2 is None):
         parser.error("--c1 and --c2 must be given together")
+    if (args.k0 is None) != (args.k1 is None):
+        parser.error("--k0 and --k1 must be given together")
+    if args.c1 is not None and args.k0 is not None:
+        parser.error("Use either --c1/--c2 or --k0/--k1, not both")
+    if args.max_neighbor_constraints is not None and args.max_neighbor_constraints < 1:
+        parser.error("--max-neighbor-constraints must be positive")
 
     project_root, run_dir, run_config, study_config = resolve_run(args)
     output_dir = prepare_output_dir(project_root, args.output_dir)
     source = _git_provenance(project_root, output_dir, allow_dirty=bool(args.allow_dirty_exploratory))
-    gains = hocbf_gains(args.c1, args.c2) if args.c1 is not None else None
+    if args.c1 is not None:
+        gains = hocbf_gains(args.c1, args.c2)
+    elif args.k0 is not None:
+        if not (math.isfinite(args.k0) and math.isfinite(args.k1) and args.k0 > 0.0 and args.k1 > 0.0):
+            parser.error("--k0 and --k1 must be finite and positive")
+        gains = {"CBF_K0": float(args.k0), "CBF_K1": float(args.k1)}
+    else:
+        gains = None
     env_config, max_policy_steps, changes = apply_env_overrides(
         run_config["env_config"],
         max_policy_steps=int(study_config["evaluation_task_max_policy_steps"]),
@@ -217,7 +243,12 @@ def main() -> int:
         spawn_psi1_gain=args.spawn_psi1_gain,
         require_initial_safe_set=None if args.require_initial_safe_set is None else args.require_initial_safe_set == "true",
     )
-    namespace = build_namespace(project_root, run_config, gains)
+    namespace = build_namespace(
+        project_root,
+        run_config,
+        gains,
+        max_neighbor_constraints=args.max_neighbor_constraints,
+    )
     eval_args = evaluation_args(
         run_config, study_config, max_policy_steps=max_policy_steps, workers=args.workers, ttc_cap=args.ttc_cap
     )
@@ -232,7 +263,10 @@ def main() -> int:
         "model_path": str(model_path),
         "model_sha256": progression.protocol.file_sha256(model_path),
         "env_config_changes": changes,
-        "hocbf_rates": None if gains is None else {"c1": gains["CBF_PSI1_GAIN"], "c2": gains["CBF_K1"] - gains["CBF_PSI1_GAIN"]},
+        "hocbf_rates": (
+            None if args.c1 is None else {"c1": gains["CBF_PSI1_GAIN"], "c2": gains["CBF_K1"] - gains["CBF_PSI1_GAIN"]}
+        ),
+        "hocbf_coefficient_override": None if args.k0 is None else {"k0": float(args.k0), "k1": float(args.k1)},
         "cbf": {key: namespace[key] for key in ("CBF_K0", "CBF_K1", "CBF_PSI1_GAIN", "CBF_EPS_SIDE", "CBF_MAX_NEIGHBOR_CONSTRAINTS")},
         "episodes_per_mode": int(args.episodes),
         "episode_seed_start": int(args.seed_start),
