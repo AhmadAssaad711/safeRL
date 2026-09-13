@@ -92,6 +92,12 @@ def build_cbf_action_constraints(
     min_center_distance = np.inf
     min_required_distance = np.inf
     neighbor_constraints = 0
+    # Per-barrier h and dh/dt, kept so a reward term can use a short-horizon
+    # predicted barrier instead of only the aggregate psi2 residual. h_dot is
+    # only available from the batch builder; consumers must handle its absence.
+    barrier_h: list[float] = []
+    barrier_h_dot: list[float] = []
+    barrier_h_dot_available = True
 
     batch_builder = namespace.get("batch_pairwise_hocbf_constraints")
     if callable(batch_builder) and neighbors:
@@ -102,10 +108,13 @@ def build_cbf_action_constraints(
             k0=k0,
             k1=k1,
         )
+        batch_h_dot = np.asarray(batch["h_dot"], dtype=float)
         for index in range(len(neighbors)):
             constraint_rows.append(np.asarray(batch["A"][index], dtype=float))
             constraint_bounds.append(float(batch["b"][index]))
             min_h = min(min_h, float(batch["h"][index]))
+            barrier_h.append(float(batch["h"][index]))
+            barrier_h_dot.append(float(batch_h_dot[index]))
             min_center_distance = min(
                 min_center_distance,
                 float(batch["center_distance"][index]),
@@ -137,6 +146,8 @@ def build_cbf_action_constraints(
             constraint_rows.append(np.asarray(A, dtype=float))
             constraint_bounds.append(float(b))
             min_h = min(min_h, float(h_ij))
+            barrier_h.append(float(h_ij))
+            barrier_h_dot_available = False
             min_center_distance = min(
                 min_center_distance,
                 float(center_distance),
@@ -157,6 +168,10 @@ def build_cbf_action_constraints(
     constraint_bounds.append(float(k1 * ego_vy + k0 * h_left))
     constraint_rows.append(np.asarray([0.0, 1.0], dtype=float))
     constraint_bounds.append(float(-k1 * ego_vy + k0 * h_right))
+    # The road boundaries are barriers too: d/dt(y - half) = vy and
+    # d/dt(W - half - y) = -vy.
+    barrier_h.extend([float(h_left), float(h_right)])
+    barrier_h_dot.extend([float(ego_vy), float(-ego_vy)])
 
     lb = np.asarray([float(ax_bounds[0]), float(ay_bounds[0])], dtype=float)
     ub = np.asarray([float(ax_bounds[1]), float(ay_bounds[1])], dtype=float)
@@ -180,6 +195,12 @@ def build_cbf_action_constraints(
         "left_boundary_h": float(h_left),
         "right_boundary_h": float(h_right),
         "min_boundary_h": float(min(h_left, h_right)),
+        "barrier_h": np.asarray(barrier_h, dtype=float),
+        "barrier_h_dot": (
+            np.asarray(barrier_h_dot, dtype=float)
+            if barrier_h_dot_available
+            else np.empty(0, dtype=float)
+        ),
     }
 
 

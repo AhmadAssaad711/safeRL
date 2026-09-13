@@ -190,6 +190,18 @@ VARIANT_SPECS: dict[str, dict[str, Any]] = {
         "detached_actor_loss": False,
         "safety_critic": False,
     },
+    "ppo_hocbf_dense_raw": {
+        "label": "PPO raw execution + dense rate-aware HOCBF reward",
+        "level": 1,
+        "execution_mode": "box",
+        "reward_penalty": False,
+        "hocbf_reward": False,
+        "dense_hocbf_reward": True,
+        "projected_mean": False,
+        "differentiable_actor_loss": False,
+        "detached_actor_loss": False,
+        "safety_critic": False,
+    },
     "ppo_cbf_shield_only": {
         "label": "PPO trained with CBF execution (reward-off control)",
         "level": 2,
@@ -343,6 +355,7 @@ WINDOWS_TENSORBOARD_PATH_LIMIT = 248
 TENSORBOARD_VARIANT_IDS = {
     "ppo_nominal": "nom",
     "ppo_hocbf_reward_raw": "hcr",
+    "ppo_hocbf_dense_raw": "hdns",
     "ppo_cbf_shield_only": "shld",
     "ppo_cbf_reward": "rwd",
     "ppo_cbf_nd_reward_actor": "ndra",
@@ -791,6 +804,21 @@ def _effective_training_settings(
         "hocbf_reward_margin": (
             float(getattr(args, "hocbf_reward_margin", 0.0))
             if bool(spec.get("hocbf_reward", False))
+            else 0.0
+        ),
+        "dense_hocbf_lambda": (
+            float(getattr(args, "dense_hocbf_lambda", 0.0))
+            if bool(spec.get("dense_hocbf_reward", False))
+            else 0.0
+        ),
+        "dense_hocbf_tau": (
+            float(getattr(args, "dense_hocbf_tau", 0.5))
+            if bool(spec.get("dense_hocbf_reward", False))
+            else 0.0
+        ),
+        "dense_hocbf_w": (
+            float(getattr(args, "dense_hocbf_w", 0.25))
+            if bool(spec.get("dense_hocbf_reward", False))
             else 0.0
         ),
     }
@@ -1335,6 +1363,9 @@ def make_ppo_cbf_env(
     hocbf_reward_lambda: float = 0.0,
     hocbf_reward_scale: float = 1.0,
     hocbf_reward_margin: float = 0.0,
+    dense_hocbf_lambda: float = 0.0,
+    dense_hocbf_tau: float = 0.5,
+    dense_hocbf_w: float = 0.25,
     monitor_path: Path | None = None,
 ) -> gym.Env:
     """Build the shared physical-action/context environment for every level."""
@@ -1362,6 +1393,9 @@ def make_ppo_cbf_env(
         hocbf_reward_lambda=float(hocbf_reward_lambda),
         hocbf_reward_scale=float(hocbf_reward_scale),
         hocbf_reward_margin=float(hocbf_reward_margin),
+        dense_hocbf_lambda=float(dense_hocbf_lambda),
+        dense_hocbf_tau=float(dense_hocbf_tau),
+        dense_hocbf_w=float(dense_hocbf_w),
     )
     if "KPIInfoWrapper" in namespace:
         env = namespace["KPIInfoWrapper"](
@@ -1523,6 +1557,9 @@ def _make_ppo_worker_env(
     hocbf_reward_lambda: float,
     hocbf_reward_scale: float,
     hocbf_reward_margin: float,
+    dense_hocbf_lambda: float,
+    dense_hocbf_tau: float,
+    dense_hocbf_w: float,
     monitor_path: str,
 ) -> gym.Env:
     """Create a PPO environment inside a spawned rollout worker.
@@ -1554,6 +1591,9 @@ def _make_ppo_worker_env(
         hocbf_reward_lambda=float(hocbf_reward_lambda),
         hocbf_reward_scale=float(hocbf_reward_scale),
         hocbf_reward_margin=float(hocbf_reward_margin),
+        dense_hocbf_lambda=float(dense_hocbf_lambda),
+        dense_hocbf_tau=float(dense_hocbf_tau),
+        dense_hocbf_w=float(dense_hocbf_w),
         monitor_path=Path(monitor_path),
     )
 
@@ -1613,6 +1653,10 @@ def make_training_vec_env(
         if str(variant) == "ppo_nominal"
         else 0.0
     )
+    dense_on = bool(spec.get("dense_hocbf_reward", False))
+    dense_hocbf_lambda = float(getattr(args, "dense_hocbf_lambda", 0.0)) if dense_on else 0.0
+    dense_hocbf_tau = float(getattr(args, "dense_hocbf_tau", 0.5))
+    dense_hocbf_w = float(getattr(args, "dense_hocbf_w", 0.25))
 
     if n_envs == 1:
         def factory() -> gym.Env:
@@ -1628,6 +1672,9 @@ def make_training_vec_env(
                 hocbf_reward_lambda=hocbf_reward_lambda,
                 hocbf_reward_scale=hocbf_reward_scale,
                 hocbf_reward_margin=hocbf_reward_margin,
+                dense_hocbf_lambda=dense_hocbf_lambda,
+                dense_hocbf_tau=dense_hocbf_tau,
+                dense_hocbf_w=dense_hocbf_w,
                 monitor_path=monitor_path,
             )
 
@@ -1643,6 +1690,9 @@ def make_training_vec_env(
             "lambda_intervention": lambda_intervention,
             "correction_epsilon": float(args.correction_epsilon),
             "action_rate_penalty_lambda": action_rate_penalty_lambda,
+            "dense_hocbf_lambda": dense_hocbf_lambda,
+            "dense_hocbf_tau": dense_hocbf_tau,
+            "dense_hocbf_w": dense_hocbf_w,
             "hocbf_reward_lambda": hocbf_reward_lambda,
             "hocbf_reward_scale": hocbf_reward_scale,
             "hocbf_reward_margin": hocbf_reward_margin,
@@ -4054,6 +4104,29 @@ def parse_args() -> argparse.Namespace:
             "Optional positive HOCBF residual margin in physical psi2 units; "
             "zero enforces only psi2 >= 0."
         ),
+    )
+    parser.add_argument(
+        "--dense-hocbf-lambda",
+        type=float,
+        default=0.154,
+        help=(
+            "Coefficient of the dense rate-aware HOCBF reward "
+            "lambda*sum_i sigmoid(-(h_i + tau*h_dot_i)/w); active only for "
+            "ppo_hocbf_dense_raw. Default lands the term near 15%% of the base "
+            "reward on a nominal rollout."
+        ),
+    )
+    parser.add_argument(
+        "--dense-hocbf-tau",
+        type=float,
+        default=0.5,
+        help="Lookahead in seconds for the predicted barrier h + tau*h_dot.",
+    )
+    parser.add_argument(
+        "--dense-hocbf-w",
+        type=float,
+        default=0.25,
+        help="Softness of the per-barrier sigmoid in predicted-barrier units.",
     )
     parser.add_argument(
         "--hocbf-calibration-seed",

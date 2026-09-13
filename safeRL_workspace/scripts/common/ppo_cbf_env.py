@@ -80,6 +80,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         hocbf_reward_lambda: float = 0.0,
         hocbf_reward_scale: float = 1.0,
         hocbf_reward_margin: float = 0.0,
+        dense_hocbf_lambda: float = 0.0,
+        dense_hocbf_tau: float = 0.5,
+        dense_hocbf_w: float = 0.25,
     ) -> None:
         super().__init__(env)
         self.namespace = namespace
@@ -148,6 +151,15 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             raise ValueError("hocbf_reward_scale must be finite and positive")
         if not np.isfinite(self.hocbf_reward_margin) or self.hocbf_reward_margin < 0.0:
             raise ValueError("hocbf_reward_margin must be finite and non-negative")
+        self.dense_hocbf_lambda = float(dense_hocbf_lambda)
+        self.dense_hocbf_tau = float(dense_hocbf_tau)
+        self.dense_hocbf_w = float(dense_hocbf_w)
+        if not np.isfinite(self.dense_hocbf_lambda) or self.dense_hocbf_lambda < 0.0:
+            raise ValueError("dense_hocbf_lambda must be finite and non-negative")
+        if not np.isfinite(self.dense_hocbf_tau) or self.dense_hocbf_tau < 0.0:
+            raise ValueError("dense_hocbf_tau must be finite and non-negative")
+        if not np.isfinite(self.dense_hocbf_w) or self.dense_hocbf_w <= 0.0:
+            raise ValueError("dense_hocbf_w must be finite and positive")
 
         self.action_space = gym.spaces.Box(
             low=np.asarray([self.ax_bounds[0], self.ay_bounds[0]], dtype=np.float32),
@@ -389,6 +401,33 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             "hocbf_mean_violation": float(np.mean(violations)),
             "hocbf_max_abs_residual": float(np.max(np.abs(slack))),
         }
+
+    def _dense_hocbf_penalty(self, system: dict[str, Any]) -> float:
+        """Dense, rate-aware barrier penalty on the state the action produced.
+
+        ``lambda * sum_i sigmoid(-(h_i + tau*h_dot_i) / w)`` over every barrier,
+        vehicles and both road boundaries alike.
+
+        Rationale (measured, see docs/hocbf_reward_investigation.md): the psi2
+        residual the original term uses ranks pre-collision states at AUC 0.72,
+        whereas this short-horizon predicted barrier reaches 0.93. Each barrier
+        contributes at most 1.0, so the term stays bounded by the barrier count
+        and cannot spike a PPO update the way an exponential can.
+        """
+
+        if self.dense_hocbf_lambda <= 0.0:
+            return 0.0
+        h = np.asarray(system.get("barrier_h", ()), dtype=float)
+        h_dot = np.asarray(system.get("barrier_h_dot", ()), dtype=float)
+        if h.size == 0 or h_dot.size != h.size:
+            # h_dot is unavailable only on the non-batch geometry path; a
+            # silently zero safety term would be worse than a hard failure.
+            raise RuntimeError(
+                "dense HOCBF reward requires per-barrier h_dot from "
+                "batch_pairwise_hocbf_constraints"
+            )
+        z = np.clip(-(h + self.dense_hocbf_tau * h_dot) / self.dense_hocbf_w, -50.0, 50.0)
+        return float(self.dense_hocbf_lambda * np.sum(1.0 / (1.0 + np.exp(-z))))
 
     def _project_substep_action(
         self, raw_action: Any
@@ -999,6 +1038,14 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             }
         )
         next_system = self._constraint_system()
+        # Evaluated on the resulting state, so the penalty credits the action
+        # that produced it rather than the state it was taken from.
+        dense_penalty = self._dense_hocbf_penalty(next_system)
+        reward = float(reward) - dense_penalty
+        info["cbf_dense_hocbf_penalty"] = float(dense_penalty)
+        info["cbf_dense_hocbf_lambda"] = float(self.dense_hocbf_lambda)
+        info["cbf_dense_hocbf_tau"] = float(self.dense_hocbf_tau)
+        info["cbf_dense_hocbf_w"] = float(self.dense_hocbf_w)
         return (
             self._augment_observation(observation, next_system),
             reward,
