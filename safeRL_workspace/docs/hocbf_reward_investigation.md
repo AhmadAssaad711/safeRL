@@ -399,3 +399,102 @@ essentially every axis. That shape is itself the interesting finding:
 
 Operating point selected: **lambda=0.154, tau=0.5, w=0.25**. Confirmation runs
 on seeds 308 and 309 launched at 00:38.
+
+### 2026-09-14 01:20 - THREE-SEED RESULT (lambda=0.154, tau=0.5, w=0.25)
+
+Mean +/- sd over seeds 307/308/309, 200+200 evaluation episodes each.
+
+**CBF-OFF (raw) - the primary target:**
+
+| KPI | A1 nominal | B1 hocbf (old term) | dense term |
+| --- | --- | --- | --- |
+| **Ego collisions / km** | 7.813 +- 0.700 | 7.430 +- 0.689 | **6.686 +- 0.342** |
+| Episode return | 118.07 +- 11.94 | 118.38 +- 4.94 | **134.77 +- 9.62** |
+| Mean lateral tracking err (m) | 1.978 +- 0.133 | 2.218 +- 0.095 | **1.617 +- 0.047** |
+| Abs speed error (m/s) | 4.699 +- 0.450 | 4.703 +- 2.261 | **3.620 +- 1.099** |
+| Mean jerk norm | 1.887 +- 0.788 | **1.361 +- 0.447** | 1.911 +- 0.429 |
+| Episode length (steps) | 217.2 +- 18.9 | 222.5 +- 37.8 | **227.4 +- 29.8** |
+
+**CBF-ON:**
+
+| KPI | A1 nominal | B1 hocbf (old term) | dense term |
+| --- | --- | --- | --- |
+| Ego collisions / km | 0.300 +- 0.042 | 0.312 +- 0.066 | **0.271 +- 0.047** |
+| Completion | 0.748 +- 0.033 | 0.743 +- 0.050 | **0.775 +- 0.039** |
+| Episode return | 766.7 +- 9.1 | 751.5 +- 19.2 | **800.7 +- 17.5** |
+| Mean lateral tracking err (m) | 2.005 +- 0.134 | 2.103 +- 0.049 | **1.526 +- 0.025** |
+| **Intervention rate** | 0.873 +- 0.090 | 0.896 +- 0.018 | **0.722 +- 0.040** |
+| Minimum h | -0.431 +- 0.019 | -0.443 +- 0.004 | **-0.413 +- 0.038** |
+| Mean jerk norm | 4.704 +- 0.528 | 4.520 +- 0.255 | 4.720 +- 0.104 |
+
+Per-seed on the primary metric:
+
+| seed | A1 | dense | change |
+| --- | --- | --- | --- |
+| 307 | 7.679 | 6.247 | **-18.7%** |
+| 308 | 7.030 | 7.083 | +0.7% |
+| 309 | 8.729 | 6.729 | **-22.9%** |
+| mean | 7.813 | 6.686 | **-14.4%** |
+
+**Assessment - a real effect, short of the bar I set.**
+
+- Raw collisions/km fall **14.4%** where the old term managed 4.9%. Two seeds
+  improve ~20%, one is flat. That is below the >=20% I pre-registered, so by my
+  own criterion this is a *candidate*, not a confirmed fix. It is, however, the
+  first version of this term with any measurable safety effect at all, and its
+  seed spread is tighter than the control's (+-0.342 vs +-0.700).
+- **Shield intervention drops 17%** (0.873 -> 0.722) and `min_h` improves. The
+  policy demonstrably needs less correcting - the property the term was always
+  supposed to produce.
+- **Driving quality improves rather than degrades**, which was the explicit
+  constraint: completion +2.7 pp, return +34, and lateral tracking error 24%
+  better (2.005 -> 1.526 m), the largest single improvement in the table.
+- **The seed-307 jerk regression did not survive replication**: 4.704 -> 4.720
+  with the shield on, i.e. flat. I called that out as the main worry after T1;
+  on three seeds it is noise.
+
+**Guardrails, and one genuine failure.** Averaged over the probe episodes,
+time within 0.5 m of an edge falls 65.4% -> 48.5% and mean speed is 13.74 ->
+14.01, so neither degeneracy appears on average - and the old term's
+edge-hugging (median y pinned at 9.30) is gone. **But seed 309 crawls**: mean
+speed 13.07 -> 11.02 and the speed deficit nearly doubles to 4.98. That is
+exactly the "slowing down to let traffic past" failure to watch for, and it
+appears on the same seed that gave the *best* collision improvement (-22.9%).
+Some of the safety gain on that seed is bought by driving slower, which is not
+an acceptable trade and is not visible in the collisions/km number alone.
+
+So: the term now works, the mechanism is right, and it does not induce
+edge-hugging - but on one seed of three it buys safety with speed, and the mean
+effect is 14% rather than the 20% I set as the bar.
+
+### 2026-09-14 01:40 - tau sweep (lambda=0.154, seed 307)
+
+| tau | raw coll/km | CBF-ON completion | CBF-ON coll/km | CBF-ON return | intervention | steps near edge | mean speed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.35 | **6.226** | 0.770 | 0.279 | 784.3 | 0.779 | 61.7% | **15.97** |
+| **0.50** | 6.247 | **0.805** | **0.233** | 813.8 | 0.757 | 59.7% | 15.27 |
+| 0.75 | 8.596 | 0.805 | 0.232 | **818.3** | **0.605** | **35.6%** | 12.28 |
+
+A clean conservatism gradient. Longer lookahead makes the policy progressively
+more cautious: intervention rate falls monotonically (0.779 -> 0.757 -> 0.605)
+and so does speed (15.97 -> 15.27 -> 12.28). But **tau=0.75 is over-cautious in
+a way that costs real safety** - raw collisions jump to 8.596, worse than the
+7.679 control, while the ego crawls at 12.28 against a 16.0 target. Caution
+that slows the car does not prevent unshielded collisions here.
+
+tau=0.35 keeps the best speed and ties on raw collisions but gives up the
+shield-side gains (completion 0.770 vs 0.805, collisions 0.279 vs 0.233,
+return 784 vs 814).
+
+**tau=0.5 retained.** Worth noting the offline AUC analysis picked tau=0.5
+before any training ran, and the trained outcomes agree - the cheap offline
+ranking predicted the right hyperparameter, which is some evidence the
+analyse-then-train loop is worth keeping for the next iteration.
+
+### 2026-09-14 01:36 - extending to five seeds
+
+The headline (-14.4%, 2 of 3 seeds) rests on three seeds with a control spread
+of +-0.700, so the estimate is the weakest part of the result. Rather than
+sweep further hyperparameters, remaining time goes to seeds 310 and 311 for
+both the dense variant **and** matched `ppo_nominal` controls (the completed
+study only has controls at 307-309), giving a five-seed paired comparison.
