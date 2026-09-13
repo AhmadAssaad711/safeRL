@@ -4151,6 +4151,12 @@ def parse_args() -> argparse.Namespace:
         help="First-level CBF gain in psi1 = h_dot + psi1_gain*h.",
     )
     parser.add_argument(
+        "--max-neighbor-constraints",
+        type=int,
+        default=None,
+        help="Cap on nearest-neighbor CBF constraints (overrides CBF_MAX_NEIGHBOR_CONSTRAINTS).",
+    )
+    parser.add_argument(
         "--task-distance-m",
         type=float,
         default=DEFAULT_TASK_DISTANCE_M,
@@ -4421,6 +4427,10 @@ def main() -> int:
         namespace["CBF_K1"] = float(args.k1)
     if args.psi1_gain is not None:
         namespace["CBF_PSI1_GAIN"] = float(args.psi1_gain)
+    if args.max_neighbor_constraints is not None:
+        if int(args.max_neighbor_constraints) < 1:
+            raise ValueError("--max-neighbor-constraints must be positive")
+        namespace["CBF_MAX_NEIGHBOR_CONSTRAINTS"] = int(args.max_neighbor_constraints)
     env_config = env_config_from_args(args, namespace["ENV_CONFIG"])
     if active_traffic_model(env_config) == "mtm":
         _deep_set_defaults(
