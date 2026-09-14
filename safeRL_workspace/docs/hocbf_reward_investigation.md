@@ -657,3 +657,54 @@ This is a two-seed result on the seeds selected *because* they failed, which is
 a biased sample; seeds 307/308/310 at lambda=0.11 were launched at 03:08 to
 complete an unbiased five-seed set. **Treat lambda=0.11 as the recommended
 starting point for the next session, not as a confirmed result.**
+
+### 2026-09-14 03:48 - FINAL: unbiased five seeds at lambda=0.11 (and it corrects me again)
+
+| mode / KPI | control | dense@0.154 | dense@0.11 |
+| --- | --- | --- | --- |
+| raw Ego collisions / km | 7.241 | **6.717** | 7.291 |
+| raw Mean jerk norm | 1.714 | 1.955 | **1.264** |
+| CBF-ON Ego collisions / km | 0.304 | **0.240** | 0.272 |
+| CBF-ON completion | 0.747 | **0.798** | 0.774 |
+| CBF-ON Episode return | 771.5 | **818.3** | 782.0 |
+| CBF-ON lateral tracking err (m) | 1.917 | **1.444** | 1.793 |
+| CBF-ON intervention rate | 0.846 | **0.686** | 0.766 |
+| CBF-ON Mean jerk norm | **4.504** | 4.820 | 4.575 |
+
+Per-seed raw collisions at lambda=0.11: -7.4%, -7.6%, -23.2%, **+35.8%**,
+**+17.9%** -> mean **+0.7%**, improved 3/5, **paired t = +0.07**. That is
+exactly zero effect.
+
+**My lambda=0.11 recommendation from 40 minutes ago was wrong, for the same
+reason the three-seed headline was wrong.** I tested it only on the two seeds
+that had failed, it looked excellent on both, and on an unbiased five-seed set
+it has no safety effect at all and gives back most of the shield-side gains
+(shielded collisions 0.240 -> 0.272, completion 0.798 -> 0.774, return 818 ->
+782, tracking 1.444 -> 1.793, intervention 0.686 -> 0.766). Selecting a
+configuration on the seeds where the previous configuration failed is
+regression to the mean wearing a lab coat. Twice in one session, the same
+mistake; the only defence that worked both times was running more seeds.
+
+What lambda=0.11 *does* buy is smoothness: raw jerk 1.264 vs the control's
+1.714 and 0.154's 1.955, and shielded jerk 4.575 vs 4.820. So the jerk
+regression at 0.154 is real and lambda trades jerk against shield-compatibility.
+
+**Final position:**
+
+- **lambda=0.154 is the operating point to keep.** Its five-of-five-seed
+  improvements in shielded operation (collisions -21%, intervention -19%,
+  tracking -25%, completion +6.8%, return +6.1%) are the only robust effect
+  found in this session. Its costs are +7% jerk and a crawling collapse on two
+  of five seeds.
+- **The original goal - making the unshielded policy safer - was not achieved
+  by any configuration tested.** lambda=0.154 gives -7.2% (t=-0.85), lambda=0.11
+  gives +0.7% (t=+0.07). Neither is distinguishable from zero at n=5.
+- The old `ppo_hocbf_reward_raw` term remains unfixed in the sense its author
+  intended, but it is now *understood*: measured AUC 0.72 basis, non-monotone in
+  distance, ~1% of the reward, and unfixable by its three exposed knobs.
+
+**If picking this up next session, in order:** (1) 10 seeds at lambda=0.154 to
+settle whether the raw-safety effect is genuinely zero or just small; (2) the
+threshold-shifted max aggregation described above, which is the untested idea
+most likely to fix both crawling and edge-farming at once; (3) only then more
+hyperparameter sweeps.
