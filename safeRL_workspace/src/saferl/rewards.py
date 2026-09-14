@@ -86,6 +86,15 @@ DEFAULT_LATERAL_FIELD_BETA = 6.0
 DEFAULT_LATERAL_FIELD_TRAVEL_WEIGHT = 0.5
 DEFAULT_LATERAL_FIELD_BASIN_MARGIN = 0.25
 DEFAULT_LATERAL_FIELD_HYSTERESIS = 0.0
+# Wall repulsion. The occupancy field sums contributions from vehicles only, so
+# a road boundary reads as free space and the target is pulled toward it: with
+# the field target the measured target sits in the outer 1.5 m of a 10.2 m road
+# ~23% of the time. These give each boundary an occupancy contribution of the
+# same functional form as a vehicle, so "the wall occupies space" is expressed
+# in the same units the rest of the field already uses. Default 0.0 keeps the
+# historical behaviour; the feature is opt-in.
+DEFAULT_LATERAL_FIELD_WALL_WEIGHT = 0.0
+DEFAULT_LATERAL_FIELD_WALL_SIGMA_M = 0.9
 
 ALL_LATERAL_BLOCKERS = "all"
 CLOSING_LATERAL_BLOCKERS = "closing"
@@ -362,6 +371,11 @@ def lateral_field_parameters(reward_config: Mapping[str, Any]) -> dict[str, floa
             reward_config.get("lateral_field_sigma_m", DEFAULT_LATERAL_FIELD_SIGMA_M)
         ),
         "beta": float(reward_config.get("lateral_field_beta", DEFAULT_LATERAL_FIELD_BETA)),
+        "wall_sigma_m": float(
+            reward_config.get(
+                "lateral_field_wall_sigma_m", DEFAULT_LATERAL_FIELD_WALL_SIGMA_M
+            )
+        ),
     }
     for key, value in parameters.items():
         if not math.isfinite(value) or value <= 0.0:
@@ -370,6 +384,7 @@ def lateral_field_parameters(reward_config: Mapping[str, Any]) -> dict[str, floa
         ("travel_weight", DEFAULT_LATERAL_FIELD_TRAVEL_WEIGHT),
         ("basin_margin", DEFAULT_LATERAL_FIELD_BASIN_MARGIN),
         ("hysteresis", DEFAULT_LATERAL_FIELD_HYSTERESIS),
+        ("wall_weight", DEFAULT_LATERAL_FIELD_WALL_WEIGHT),
     ):
         value = float(reward_config.get(f"lateral_field_{key}", default))
         if not math.isfinite(value) or value < 0.0:
@@ -472,6 +487,21 @@ def make_field_target_wrapper(base_wrapper: type) -> type:
                     numpy.abs(grid - float(vehicle.position[1])) - half_span, 0.0
                 )
                 occupancy += relevance * numpy.exp(-((clearance / sigma) ** 2))
+            wall_weight = parameters["wall_weight"]
+            if wall_weight > 0.0:
+                # A boundary is an obstacle the field could not previously see.
+                # Clearance is measured from the ego's own edge to the wall, the
+                # same way a vehicle's clearance is measured edge-to-edge, so the
+                # two contributions are directly comparable.
+                road_width = float(base.config["road_width"])
+                half_width = 0.5 * ego_width
+                wall_sigma = parameters["wall_sigma_m"]
+                left_clearance = numpy.maximum(grid - half_width, 0.0)
+                right_clearance = numpy.maximum(road_width - half_width - grid, 0.0)
+                occupancy += wall_weight * (
+                    numpy.exp(-((left_clearance / wall_sigma) ** 2))
+                    + numpy.exp(-((right_clearance / wall_sigma) ** 2))
+                )
             return occupancy
 
         def _field_lateral_target(self) -> float:
@@ -903,6 +933,28 @@ def add_reward_variant_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--lateral-field-wall-weight",
+        type=float,
+        default=None,
+        help=(
+            "Occupancy each road boundary contributes to the field, in the same "
+            "units as a vehicle's. Without it the field sums vehicles only, so a "
+            "wall reads as free space and the target is pulled into it "
+            f"(default {DEFAULT_LATERAL_FIELD_WALL_WEIGHT}, i.e. off). "
+            "Requires --lateral-target field."
+        ),
+    )
+    parser.add_argument(
+        "--lateral-field-wall-sigma-m",
+        type=float,
+        default=None,
+        help=(
+            "Decay of the boundary occupancy with clearance from the ego's edge, "
+            f"in m (default {DEFAULT_LATERAL_FIELD_WALL_SIGMA_M}). "
+            "Requires --lateral-target field."
+        ),
+    )
+    parser.add_argument(
         "--lateral-field-travel-weight",
         type=float,
         default=None,
@@ -1017,6 +1069,8 @@ def apply_reward_variant_arguments(args: argparse.Namespace, reward_config: dict
         "lateral_field_travel_weight",
         "lateral_field_basin_margin",
         "lateral_field_hysteresis",
+        "lateral_field_wall_weight",
+        "lateral_field_wall_sigma_m",
     ):
         value = getattr(args, name, None)
         if value is None:
