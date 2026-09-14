@@ -620,3 +620,40 @@ before any training, and the trained runs agreed. Characterising the term on a
 labelled rollout trace costs seconds and predicted the right hyperparameter;
 the 250k runs were then needed only to confirm it and to expose the behavioural
 failures (crawling) that a static score cannot show.
+
+### 2026-09-14 03:05 - lambda=0.11 fixes the crawling, on both affected seeds
+
+Rather than sweep further, the last runs went straight at the clearest failure:
+retrain the two seeds that collapsed into the slow mode, at lambda=0.11 instead
+of 0.154.
+
+| | seed 309 | seed 311 |
+| --- | --- | --- |
+| control speed | 13.07 | 12.55 |
+| lambda=0.154 speed | **11.02** | **9.45** |
+| **lambda=0.11 speed** | **16.71** | **15.66** |
+| control raw coll/km | 8.729 | 6.637 |
+| lambda=0.154 raw coll/km | 6.729 | 8.155 |
+| lambda=0.11 raw coll/km | 6.704 | 7.824 |
+| lambda=0.154 raw jerk | 2.383 | - |
+| lambda=0.11 raw jerk | **0.904** | **1.132** |
+
+**The crawl is gone on both seeds** - speeds go from 11.02/9.45 to 16.71/15.66,
+now *above* their own controls rather than far below - while raw collisions are
+unchanged-to-better (6.729 -> 6.704 and 8.155 -> 7.824). Jerk, the other
+regression, improves sharply too: seed 309's raw jerk falls to 0.904 against a
+control of 2.967, and its shielded jerk (4.420) is now better than the
+control's (5.423).
+
+Seed 309 at lambda=0.11 also beats lambda=0.154 on the shield side: completion
+0.805 vs 0.720, shielded collisions 0.232 vs 0.338, return 786 vs 776.
+
+So the offline calibration that picked lambda=0.154 (targeting ~22% of the
+reward) was slightly too strong: it bought its effect partly by making the
+policy timid, and on two of five seeds the timidity won outright. **lambda=0.11
+looks like the better operating point** - same safety, no crawling, less jerk.
+
+This is a two-seed result on the seeds selected *because* they failed, which is
+a biased sample; seeds 307/308/310 at lambda=0.11 were launched at 03:08 to
+complete an unbiased five-seed set. **Treat lambda=0.11 as the recommended
+starting point for the next session, not as a confirmed result.**
