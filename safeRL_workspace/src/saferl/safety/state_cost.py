@@ -2,31 +2,35 @@
 
 The cost is evaluated on a state, not on an action::
 
-    C(s) = max_i { lambda_h,c * [delta_h,c - h_i]_+^2
-                 + lambda_psi,c * [delta_psi,c - psi_1,i]_+^2 }
+    C(s) = max_i { [ (delta_h,c - h_i) / sigma_h,c ]_+^2
+                 + [ (delta_psi,c - psi_1,i) / sigma_psi,c ]_+^2 }
 
 with ``psi_1,i = h_dot_i + psi1_gain * h_i`` and the class ``c`` of barrier
 ``i`` being either ``vehicle`` or ``boundary``.
 
-Two design points, both deliberate:
+Margins and scales have separate jobs and are calibrated separately:
 
-* **Positive margins.** ``delta_h`` and ``delta_psi`` start the feedback before
-  the corresponding condition is violated, so the policy is pushed away from
-  poor clearance-and-closing-speed combinations rather than only punished once
-  ``h`` or ``psi_1`` has already gone negative. They are also what keeps a
-  ``max`` aggregation usable: ``C`` is exactly zero whenever every barrier sits
-  outside both margins, so the term is not a constant per-step tax in safe
-  states.
-* **Separate normalization per class.** Vehicle ``h`` is the dimensionless
-  relative-ellipse value and boundary ``h`` is a clearance in metres; measured
-  on a trained nominal policy their per-step minima have medians of 1.553 and
-  0.000 respectively. One shared coefficient cannot make those commensurate,
-  so each class carries its own margin and coefficient.
+* **Margins** (``delta``) fix *when* the feedback starts. A positive margin
+  begins the penalty before the corresponding condition is violated, so the
+  policy is pushed away from poor clearance-and-closing-speed combinations
+  rather than punished only once ``h`` or ``psi_1`` has already gone negative.
+  They are also what keeps a ``max`` aggregation usable: ``C`` is exactly zero
+  whenever every barrier sits outside both margins, so the term is not a
+  constant per-step tax in safe states.
+* **Scales** (``sigma``) fix *what counts as substantial risk*. Each is set
+  from a reference situation ``x_ref`` that is considered meaningfully risky,
+  via ``sigma = delta - x_ref``, which makes that situation score exactly 1.
+  They are deliberately not fitted to the variance of all visited states:
+  abundant harmless states dilute the signal precisely where it matters.
 
-``lambda_*`` are multiplicative coefficients rather than divisors: a previous
-formulation divided by a scale ``sigma`` inside the square, and
-``lambda = 1 / sigma**2`` is the same function with one fewer inversion to
-reason about when tuning.
+The outer ``lambda_s`` is separate again and sets how strongly learning
+responds; it belongs to the reward, not to the risk definition.
+
+**Separate normalization per class.** Vehicle ``h`` is the dimensionless
+relative-ellipse value and boundary ``h`` is a clearance in metres; measured
+on a trained nominal policy their per-step minima have medians of 1.553 and
+0.000 respectively. One shared scale cannot make those commensurate, so each
+class carries its own margin and scale.
 """
 
 from __future__ import annotations
@@ -40,12 +44,13 @@ import numpy as np
 VEHICLE_CLASS = "vehicle"
 BOUNDARY_CLASS = "boundary"
 
-# Measured starting point; see docs/hocbf_reward_investigation.md. Vehicle
-# values are in relative-ellipse units, boundary values in metres (and m/s).
+# Reference-calibrated starting point; see the behaviour checks in
+# tests/unit/test_state_cost_behaviour.py. Vehicle values are in
+# relative-ellipse units, boundary values in metres (and m/s).
 DEFAULT_DELTA_H = (1.0, 0.5)
-DEFAULT_LAMBDA_H = (1.0, 4.0)
+DEFAULT_SIGMA_H = (1.0, 0.5)
 DEFAULT_DELTA_PSI1 = (1.0, 0.5)
-DEFAULT_LAMBDA_PSI1 = (0.25, 1.0)
+DEFAULT_SIGMA_PSI1 = (2.0, 1.0)
 DEFAULT_PSI1_GAIN = 2.3
 DEFAULT_BOUNDARY_COUNT = 2
 
@@ -66,9 +71,9 @@ class StateCostParameters:
 
     lambda_s: float = 0.0
     delta_h: tuple[float, float] = DEFAULT_DELTA_H
-    lambda_h: tuple[float, float] = DEFAULT_LAMBDA_H
+    sigma_h: tuple[float, float] = DEFAULT_SIGMA_H
     delta_psi1: tuple[float, float] = DEFAULT_DELTA_PSI1
-    lambda_psi1: tuple[float, float] = DEFAULT_LAMBDA_PSI1
+    sigma_psi1: tuple[float, float] = DEFAULT_SIGMA_PSI1
     psi1_gain: float = DEFAULT_PSI1_GAIN
     boundary_count: int = DEFAULT_BOUNDARY_COUNT
 
@@ -76,7 +81,7 @@ class StateCostParameters:
         object.__setattr__(self, "lambda_s", float(self.lambda_s))
         object.__setattr__(self, "psi1_gain", float(self.psi1_gain))
         object.__setattr__(self, "boundary_count", int(self.boundary_count))
-        for name in ("delta_h", "lambda_h", "delta_psi1", "lambda_psi1"):
+        for name in ("delta_h", "sigma_h", "delta_psi1", "sigma_psi1"):
             object.__setattr__(self, name, _pair(getattr(self, name), name))
 
         if not math.isfinite(self.lambda_s) or self.lambda_s < 0.0:
@@ -89,10 +94,10 @@ class StateCostParameters:
             for value in getattr(self, name):
                 if not math.isfinite(value) or value < 0.0:
                     raise ValueError(f"{name} entries must be finite and >= 0")
-        for name in ("lambda_h", "lambda_psi1"):
+        for name in ("sigma_h", "sigma_psi1"):
             for value in getattr(self, name):
-                if not math.isfinite(value) or value < 0.0:
-                    raise ValueError(f"{name} entries must be finite and >= 0")
+                if not math.isfinite(value) or value <= 0.0:
+                    raise ValueError(f"{name} entries must be finite and > 0")
 
     @property
     def enabled(self) -> bool:
@@ -107,13 +112,29 @@ class StateCostParameters:
             "boundary_count": self.boundary_count,
             "delta_h_vehicle": self.delta_h[0],
             "delta_h_boundary": self.delta_h[1],
-            "lambda_h_vehicle": self.lambda_h[0],
-            "lambda_h_boundary": self.lambda_h[1],
+            "sigma_h_vehicle": self.sigma_h[0],
+            "sigma_h_boundary": self.sigma_h[1],
             "delta_psi1_vehicle": self.delta_psi1[0],
             "delta_psi1_boundary": self.delta_psi1[1],
-            "lambda_psi1_vehicle": self.lambda_psi1[0],
-            "lambda_psi1_boundary": self.lambda_psi1[1],
+            "sigma_psi1_vehicle": self.sigma_psi1[0],
+            "sigma_psi1_boundary": self.sigma_psi1[1],
         }
+
+    @staticmethod
+    def scale_from_reference(delta: float, reference: float) -> float:
+        """Return the scale that makes ``reference`` score exactly 1.
+
+        ``reference`` is a situation considered meaningfully risky and must sit
+        inside the margin, i.e. ``reference < delta``.
+        """
+
+        scale = float(delta) - float(reference)
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError(
+                "the reference situation must be inside the margin "
+                f"(reference {reference} < delta {delta})"
+            )
+        return scale
 
 
 def _class_vector(
@@ -152,14 +173,14 @@ def barrier_state_cost(
 
     psi1 = h_dot_values + float(params.psi1_gain) * h_values
     delta_h = _class_vector(h_values.size, boundary_count, *params.delta_h)
-    lambda_h = _class_vector(h_values.size, boundary_count, *params.lambda_h)
+    sigma_h = _class_vector(h_values.size, boundary_count, *params.sigma_h)
     delta_psi1 = _class_vector(h_values.size, boundary_count, *params.delta_psi1)
-    lambda_psi1 = _class_vector(h_values.size, boundary_count, *params.lambda_psi1)
+    sigma_psi1 = _class_vector(h_values.size, boundary_count, *params.sigma_psi1)
 
-    h_hinge = np.maximum(delta_h - h_values, 0.0)
-    psi1_hinge = np.maximum(delta_psi1 - psi1, 0.0)
-    h_term = lambda_h * h_hinge**2
-    psi1_term = lambda_psi1 * psi1_hinge**2
+    h_hinge = np.maximum((delta_h - h_values) / sigma_h, 0.0)
+    psi1_hinge = np.maximum((delta_psi1 - psi1) / sigma_psi1, 0.0)
+    h_term = h_hinge**2
+    psi1_term = psi1_hinge**2
     per_barrier = h_term + psi1_term
 
     index = int(np.argmax(per_barrier))
@@ -191,17 +212,17 @@ def state_cost_parameters_from_mapping(
             float(config.get("delta_h_vehicle", DEFAULT_DELTA_H[0])),
             float(config.get("delta_h_boundary", DEFAULT_DELTA_H[1])),
         ),
-        lambda_h=(
-            float(config.get("lambda_h_vehicle", DEFAULT_LAMBDA_H[0])),
-            float(config.get("lambda_h_boundary", DEFAULT_LAMBDA_H[1])),
+        sigma_h=(
+            float(config.get("sigma_h_vehicle", DEFAULT_SIGMA_H[0])),
+            float(config.get("sigma_h_boundary", DEFAULT_SIGMA_H[1])),
         ),
         delta_psi1=(
             float(config.get("delta_psi1_vehicle", DEFAULT_DELTA_PSI1[0])),
             float(config.get("delta_psi1_boundary", DEFAULT_DELTA_PSI1[1])),
         ),
-        lambda_psi1=(
-            float(config.get("lambda_psi1_vehicle", DEFAULT_LAMBDA_PSI1[0])),
-            float(config.get("lambda_psi1_boundary", DEFAULT_LAMBDA_PSI1[1])),
+        sigma_psi1=(
+            float(config.get("sigma_psi1_vehicle", DEFAULT_SIGMA_PSI1[0])),
+            float(config.get("sigma_psi1_boundary", DEFAULT_SIGMA_PSI1[1])),
         ),
         psi1_gain=float(config.get("psi1_gain", DEFAULT_PSI1_GAIN)),
         boundary_count=int(config.get("boundary_count", DEFAULT_BOUNDARY_COUNT)),

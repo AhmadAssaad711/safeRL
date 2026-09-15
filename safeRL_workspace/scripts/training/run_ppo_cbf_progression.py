@@ -102,9 +102,9 @@ from saferl.observations import (
 from saferl.safety.state_cost import (
     DEFAULT_DELTA_H,
     DEFAULT_DELTA_PSI1,
-    DEFAULT_LAMBDA_H,
-    DEFAULT_LAMBDA_PSI1,
     DEFAULT_PSI1_GAIN,
+    DEFAULT_SIGMA_H,
+    DEFAULT_SIGMA_PSI1,
     StateCostParameters,
     state_cost_parameters_from_mapping,
 )
@@ -355,9 +355,9 @@ def resolved_state_cost(
     return StateCostParameters(
         lambda_s=float(getattr(args, "state_cost_lambda", 0.0)),
         delta_h=tuple(getattr(args, "state_cost_delta_h", DEFAULT_DELTA_H)),
-        lambda_h=tuple(getattr(args, "state_cost_lambda_h", DEFAULT_LAMBDA_H)),
+        sigma_h=tuple(getattr(args, "state_cost_sigma_h", DEFAULT_SIGMA_H)),
         delta_psi1=tuple(getattr(args, "state_cost_delta_psi1", DEFAULT_DELTA_PSI1)),
-        lambda_psi1=tuple(getattr(args, "state_cost_lambda_psi1", DEFAULT_LAMBDA_PSI1)),
+        sigma_psi1=tuple(getattr(args, "state_cost_sigma_psi1", DEFAULT_SIGMA_PSI1)),
         psi1_gain=float(getattr(args, "state_cost_psi1_gain", DEFAULT_PSI1_GAIN)),
     )
 
@@ -4208,12 +4208,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--state-cost-lambda-h",
+        "--state-cost-sigma-h",
         type=float,
         nargs=2,
         metavar=("VEHICLE", "BOUNDARY"),
-        default=list(DEFAULT_LAMBDA_H),
-        help="Coefficients of the squared h hinge, vehicle then boundary.",
+        default=list(DEFAULT_SIGMA_H),
+        help=(
+            "Scales of the h hinge, vehicle then boundary. Set each as "
+            "delta_h - h_ref for a reference situation considered meaningfully "
+            "risky, so that situation scores exactly 1."
+        ),
     )
     parser.add_argument(
         "--state-cost-delta-psi1",
@@ -4227,12 +4231,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--state-cost-lambda-psi1",
+        "--state-cost-sigma-psi1",
         type=float,
         nargs=2,
         metavar=("VEHICLE", "BOUNDARY"),
-        default=list(DEFAULT_LAMBDA_PSI1),
-        help="Coefficients of the squared psi1 hinge, vehicle then boundary.",
+        default=list(DEFAULT_SIGMA_PSI1),
+        help=(
+            "Scales of the psi1 hinge, vehicle then boundary, set the same way "
+            "as --state-cost-sigma-h."
+        ),
     )
     parser.add_argument(
         "--state-cost-psi1-gain",

@@ -1,4 +1,4 @@
-"""Contract tests for the margin-hinged HOCBF state cost."""
+﻿"""Contract tests for the margin-hinged HOCBF state cost."""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ from saferl.safety.state_cost import (
 PARAMS = StateCostParameters(
     lambda_s=1.0,
     delta_h=(1.0, 0.5),
-    lambda_h=(1.0, 4.0),
+    sigma_h=(1.0, 0.5),
     delta_psi1=(1.0, 0.5),
-    lambda_psi1=(0.25, 1.0),
+    sigma_psi1=(2.0, 1.0),
     psi1_gain=2.0,
     boundary_count=2,
 )
@@ -100,18 +100,18 @@ def test_psi1_uses_the_configured_gain():
     low_gain = StateCostParameters(
         lambda_s=1.0,
         delta_h=(0.0, 0.0),
-        lambda_h=(1.0, 1.0),
+        sigma_h=(1.0, 1.0),
         delta_psi1=(1.0, 1.0),
-        lambda_psi1=(1.0, 1.0),
+        sigma_psi1=(1.0, 1.0),
         psi1_gain=0.5,
         boundary_count=0,
     )
     high_gain = StateCostParameters(
         lambda_s=1.0,
         delta_h=(0.0, 0.0),
-        lambda_h=(1.0, 1.0),
+        sigma_h=(1.0, 1.0),
         delta_psi1=(1.0, 1.0),
-        lambda_psi1=(1.0, 1.0),
+        sigma_psi1=(1.0, 1.0),
         psi1_gain=4.0,
         boundary_count=0,
     )
@@ -150,9 +150,9 @@ def test_missing_h_dot_raises_rather_than_scoring_zero():
         ("lambda_s", -1.0),
         ("psi1_gain", 0.0),
         ("delta_h", (-1.0, 0.5)),
-        ("lambda_h", (1.0, -2.0)),
+        ("sigma_h", (1.0, -2.0)),
         ("delta_psi1", (float("nan"), 0.5)),
-        ("lambda_psi1", (1.0, float("inf"))),
+        ("sigma_psi1", (1.0, float("inf"))),
     ],
 )
 def test_invalid_parameters_are_rejected(field, value):
@@ -168,3 +168,4 @@ def test_pairs_must_hold_two_values():
 def test_round_trip_through_a_flat_mapping():
     restored = state_cost_parameters_from_mapping(PARAMS.as_dict())
     assert restored == PARAMS
+
