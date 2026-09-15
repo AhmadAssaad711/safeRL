@@ -115,12 +115,20 @@ these assumptions from the current notebook and reference:
 - environment ID: `lane-free-v0`;
 - MTM surrounding traffic;
 - periodic road: 380 m by 10.2 m;
-- 55 vehicles and five visible neighbor rows;
+- 40 vehicles (55 before 2026-09-11) and five visible neighbor rows;
 - physics: 0.01 s / 100 Hz;
 - policy and hard-CBF rate: 20 Hz, with five physics frames per policy action;
 - PPO observation: 30D target-y vehicle features plus two previous normalized
-  executed-action features;
-- retained legacy DDPG reference: separate 42D observation;
+  executed-action features, i.e. 32D at the canonical `neighbors_count = 5`.
+  This width is derived, not fixed: it is
+  `(1 + neighbors_count) * features_per_row + 2`, so the neighbor-7 study line
+  and the HOCBF reward investigation run at 42D. State `neighbors_count` with
+  any observation width, never a bare "42D" — the legacy DDPG observation is
+  also 42D with a different layout. See
+  `docs/lanelessKaralakou_reference.md`, "PPO observation width is not fixed
+  at 32D";
+- retained legacy DDPG reference: separate 42D observation (6 rows x 7
+  features, vehicle dimensions included);
 - common physical acceleration action box: `[-3, 3]` for both components;
 - strict evaluation: collision-free 1,000 m completion within 3,000 policy
   steps; a collision prevents completion;

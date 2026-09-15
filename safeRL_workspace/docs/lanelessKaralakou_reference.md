@@ -42,7 +42,7 @@ remains otherwise unchanged.
 | Traffic model | MTM | Congested and uncertain surrounding traffic |
 | Road | 380 m by 10.2 m ring | Longitudinal distance wraps around |
 | Vehicles | 40 total | One controlled ego plus surrounding traffic (55 before 2026-09-11) |
-| Neighbor rows | 5 | Nearest sensed vehicles are exposed to the policy |
+| Neighbor rows | 5 | `neighbors_count`; sets the observation width (see below) |
 | Physics | dt = 0.01 s, 100 Hz | Five simulator frames per policy action |
 | Policy rate | 20 Hz | One action is held for five physics frames |
 | CBF rate | 20 Hz | One hard CBF projection per policy action |
@@ -51,7 +51,7 @@ remains otherwise unchanged.
 | Surrounding desired speeds | 15 to 25 m/s | Sampled traffic speed range |
 | CBF gains | k1 = 8.5, k0 = 4.0 | HOCBF cascade with class-K rates c1 = 0.5, c2 = 8 |
 | CBF reset guard | h >= 0 and psi1 = h_dot + 2.3 h >= 0 | Spawn/reset gain, separate from the QP rates |
-| PPO state | 32D | 30D target-y vehicle table plus 2 previous-action values |
+| PPO state | 32D | 30D target-y vehicle table plus 2 previous-action values; width follows `neighbors_count` |
 | Evaluation task | 1,000 m | Collision-free distance completion |
 | Evaluation timeout | 3,000 policy steps | Guard against non-progressing rollouts |
 
@@ -82,12 +82,57 @@ relevant projection/filtering stage, not an unfiltered latent policy sample.
 This keeps the state semantics consistent with the transition experienced by
 the simulator.
 
+### PPO observation width is not fixed at 32D
+
+32D is the canonical five-neighbor width, not a constant of the interface.
+The learned width is computed from the resolved environment configuration by
+`_base_observation_dim` (`scripts/training/run_ppo_cbf_progression.py`):
+
+    features_per_row = 7 if observation_include_vehicle_dimensions else 5
+    width = (1 + neighbors_count) * features_per_row
+            + (2 if ppo_append_previous_action else 0)
+
+Both PPO observation widths currently in use:
+
+| Study line | `neighbors_count` | Rows x features | Learned width |
+| --- | ---: | ---: | ---: |
+| Canonical notebook contract, lateral-target ladder | 5 | 6 x 5 = 30 | **32D** |
+| Neighbor-7 study and the HOCBF reward investigation | 7 | 8 x 5 = 40 | **42D** |
+
+`neighbors_count` changes how many vehicles the policy *sees*. It is separate
+from `vehicles_count` (traffic density, 40 in both lines above) and from
+`--max-neighbor-constraints` (the CBF row budget, 7 in the neighbor-7 study).
+
+Consequences that have to be checked before reusing a checkpoint or comparing
+two runs:
+
+- checkpoints are not portable across widths, so a nominal control must be
+  retrained at the width of the treatment it is compared against;
+- `base_observation_dim` is what the network actually reads. The CBF context is
+  appended to the observation but sliced off by `context_ignoring_policy_kwargs`
+  for every non-projected variant, so changing the learned feature set means
+  changing `base_observation_dim`, not just the environment observation;
+- the ego row is row 0 in both widths, so the reward wrapper's repurposed slots
+  (ego y, target y, target speed) stay at flat indices 0, 1 and
+  `features_per_row - 1` regardless of `neighbors_count`.
+
+**A "42D observation" is ambiguous and must never appear unqualified in a
+manifest, doc or commit message.** Two different interfaces have that width:
+
+| 42D interface | Layout | Used by |
+| --- | --- | --- |
+| Neighbor-7 PPO | 8 rows x 5 features + 2 previous-action | PPO neighbor-7 study line |
+| Legacy DDPG | 6 rows x 7 features, includes vehicle dimensions | retained DDPG reference |
+
+Always state `neighbors_count` and whether vehicle dimensions are included.
+
 ### Legacy DDPG observation
 
 The retained DDPG reference uses the older flat 42D table with seven features
 per row, including vehicle dimensions. The notebook's C.1 preflight asserts
 the shape before training. This legacy interface is intentionally documented
-separately from the canonical 32D PPO interface.
+separately from the canonical PPO interface, and it is *not* the same 42D as a
+neighbor-7 PPO observation.
 
 ### Action path and units
 
