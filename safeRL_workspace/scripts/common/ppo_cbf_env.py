@@ -30,6 +30,7 @@ from scripts.common.cbf_projection import (
     project_polytope_2d_numpy,
 )
 from scripts.common.cbf_ray_mask import build_cbf_action_constraints
+from saferl.safety.state_cost import StateCostParameters, barrier_state_cost
 
 
 def constraint_system_hash(rows: np.ndarray, bounds: np.ndarray) -> str:
@@ -83,6 +84,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         dense_hocbf_lambda: float = 0.0,
         dense_hocbf_tau: float = 0.5,
         dense_hocbf_w: float = 0.25,
+        state_cost: Optional[StateCostParameters] = None,
     ) -> None:
         super().__init__(env)
         self.namespace = namespace
@@ -160,6 +162,13 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             raise ValueError("dense_hocbf_tau must be finite and non-negative")
         if not np.isfinite(self.dense_hocbf_w) or self.dense_hocbf_w <= 0.0:
             raise ValueError("dense_hocbf_w must be finite and positive")
+        # A None state cost is an explicit "off"; the dataclass validates the
+        # coefficients themselves when one is supplied.
+        self.state_cost = (
+            StateCostParameters() if state_cost is None else state_cost
+        )
+        if not isinstance(self.state_cost, StateCostParameters):
+            raise TypeError("state_cost must be a StateCostParameters instance")
 
         self.action_space = gym.spaces.Box(
             low=np.asarray([self.ax_bounds[0], self.ay_bounds[0]], dtype=np.float32),
@@ -428,6 +437,34 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             )
         z = np.clip(-(h + self.dense_hocbf_tau * h_dot) / self.dense_hocbf_w, -50.0, 50.0)
         return float(self.dense_hocbf_lambda * np.sum(1.0 / (1.0 + np.exp(-z))))
+
+    def _state_cost_penalty(
+        self, system: dict[str, Any]
+    ) -> tuple[float, dict[str, Any]]:
+        """Margin-hinged worst-barrier state cost for one constraint system.
+
+        ``lambda_s * max_i { lambda_h [delta_h - h_i]_+^2
+                           + lambda_psi [delta_psi - psi_1,i]_+^2 }``
+
+        evaluated on the state the action produced, with vehicle and road
+        boundary barriers normalized separately.  See
+        ``saferl.safety.state_cost``.
+        """
+
+        if not self.state_cost.enabled:
+            return 0.0, {}
+        h = np.asarray(system.get("barrier_h", ()), dtype=float)
+        h_dot = np.asarray(system.get("barrier_h_dot", ()), dtype=float)
+        if h.size == 0 or h_dot.size != h.size:
+            # As for the dense term: h_dot is unavailable only on the
+            # non-batch geometry path, and a silently zero safety term would
+            # be worse than a hard failure.
+            raise RuntimeError(
+                "state cost requires per-barrier h_dot from "
+                "batch_pairwise_hocbf_constraints"
+            )
+        cost, diagnostics = barrier_state_cost(h, h_dot, self.state_cost)
+        return float(self.state_cost.lambda_s) * cost, diagnostics
 
     def _project_substep_action(
         self, raw_action: Any
@@ -1046,6 +1083,31 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         info["cbf_dense_hocbf_lambda"] = float(self.dense_hocbf_lambda)
         info["cbf_dense_hocbf_tau"] = float(self.dense_hocbf_tau)
         info["cbf_dense_hocbf_w"] = float(self.dense_hocbf_w)
+        # Evaluated on the same post-step system: the cost is C(s_{t+1}), so it
+        # credits the action that produced the state rather than the state the
+        # action was taken from.
+        state_cost_penalty, state_cost_diagnostics = self._state_cost_penalty(
+            next_system
+        )
+        reward = float(reward) - state_cost_penalty
+        info["cbf_state_cost_penalty"] = float(state_cost_penalty)
+        info["cbf_state_cost_lambda_s"] = float(self.state_cost.lambda_s)
+        if state_cost_diagnostics:
+            info["cbf_state_cost"] = float(state_cost_diagnostics["cost"])
+            info["cbf_state_cost_h_term"] = float(state_cost_diagnostics["h_term"])
+            info["cbf_state_cost_psi1_term"] = float(
+                state_cost_diagnostics["psi1_term"]
+            )
+            info["cbf_state_cost_argmax_class"] = str(
+                state_cost_diagnostics["argmax_class"]
+            )
+            info["cbf_state_cost_argmax_index"] = int(
+                state_cost_diagnostics["argmax_index"]
+            )
+            info["cbf_state_cost_argmax_h"] = float(state_cost_diagnostics["argmax_h"])
+            info["cbf_state_cost_argmax_psi1"] = float(
+                state_cost_diagnostics["argmax_psi1"]
+            )
         return (
             self._augment_observation(observation, next_system),
             reward,

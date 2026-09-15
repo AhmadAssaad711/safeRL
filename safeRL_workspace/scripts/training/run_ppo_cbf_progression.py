@@ -91,8 +91,22 @@ except ModuleNotFoundError:  # Support direct ``python -m`` execution from the w
 from saferl.rewards import (
     add_reward_variant_arguments,
     apply_reward_variant_arguments,
+    resolve_speed_target,
     reward_variant_summary,
     wrap_reward_variants,
+)
+from saferl.observations import (
+    make_drop_ego_speed_slot_wrapper,
+    resolve_drop_ego_speed_slot,
+)
+from saferl.safety.state_cost import (
+    DEFAULT_DELTA_H,
+    DEFAULT_DELTA_PSI1,
+    DEFAULT_LAMBDA_H,
+    DEFAULT_LAMBDA_PSI1,
+    DEFAULT_PSI1_GAIN,
+    StateCostParameters,
+    state_cost_parameters_from_mapping,
 )
 
 
@@ -197,6 +211,18 @@ VARIANT_SPECS: dict[str, dict[str, Any]] = {
         "reward_penalty": False,
         "hocbf_reward": False,
         "dense_hocbf_reward": True,
+        "projected_mean": False,
+        "differentiable_actor_loss": False,
+        "detached_actor_loss": False,
+        "safety_critic": False,
+    },
+    "ppo_hocbf_state_cost_raw": {
+        "label": "PPO raw execution + margin-hinged HOCBF state cost",
+        "level": 1,
+        "execution_mode": "box",
+        "reward_penalty": False,
+        "hocbf_reward": False,
+        "state_cost_reward": True,
         "projected_mean": False,
         "differentiable_actor_loss": False,
         "detached_actor_loss": False,
@@ -308,7 +334,32 @@ def _base_observation_features(env_config: dict[str, Any]) -> list[str]:
 def _base_observation_dim(env_config: dict[str, Any]) -> int:
     rows = 1 + int(env_config.get("neighbors_count", 5))
     base = rows * len(_base_observation_features(env_config))
+    # The ego row's desired-speed slot is removable when the speed target is a
+    # fixed constant; see saferl.observations.
+    base -= 1 if resolve_drop_ego_speed_slot(env_config) else 0
     return base + (2 if bool(env_config.get("ppo_append_previous_action", False)) else 0)
+
+
+def resolved_state_cost(
+    args: argparse.Namespace, spec: dict[str, Any]
+) -> StateCostParameters:
+    """Return the state-cost parameters for one variant.
+
+    Variants that do not declare ``state_cost_reward`` get ``lambda_s = 0``,
+    which is an exact off-switch, so the term can never leak into a control
+    arm or into evaluation.
+    """
+
+    if not bool(spec.get("state_cost_reward", False)):
+        return StateCostParameters()
+    return StateCostParameters(
+        lambda_s=float(getattr(args, "state_cost_lambda", 0.0)),
+        delta_h=tuple(getattr(args, "state_cost_delta_h", DEFAULT_DELTA_H)),
+        lambda_h=tuple(getattr(args, "state_cost_lambda_h", DEFAULT_LAMBDA_H)),
+        delta_psi1=tuple(getattr(args, "state_cost_delta_psi1", DEFAULT_DELTA_PSI1)),
+        lambda_psi1=tuple(getattr(args, "state_cost_lambda_psi1", DEFAULT_LAMBDA_PSI1)),
+        psi1_gain=float(getattr(args, "state_cost_psi1_gain", DEFAULT_PSI1_GAIN)),
+    )
 
 
 def _ensure_ppo_observation_variant(
@@ -356,6 +407,7 @@ TENSORBOARD_VARIANT_IDS = {
     "ppo_nominal": "nom",
     "ppo_hocbf_reward_raw": "hcr",
     "ppo_hocbf_dense_raw": "hdns",
+    "ppo_hocbf_state_cost_raw": "hsc",
     "ppo_cbf_shield_only": "shld",
     "ppo_cbf_reward": "rwd",
     "ppo_cbf_nd_reward_actor": "ndra",
@@ -743,11 +795,11 @@ def training_topology(args: argparse.Namespace) -> dict[str, Any]:
 
 def _effective_training_settings(
     variant: str, args: argparse.Namespace
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """Return only loss/reward settings that affect the selected variant."""
 
     spec = VARIANT_SPECS[variant]
-    return {
+    settings: dict[str, Any] = {
         "lambda_delta": (
             float(args.lambda_delta) if bool(spec["reward_penalty"]) else 0.0
         ),
@@ -822,6 +874,13 @@ def _effective_training_settings(
             else 0.0
         ),
     }
+    # Training signatures are compared for exact equality when an existing
+    # checkpoint is verified or resumed, so this key is added only for the
+    # variant that uses it. Emitting it unconditionally would invalidate every
+    # run trained before the state cost existed.
+    if bool(spec.get("state_cost_reward", False)):
+        settings["state_cost"] = resolved_state_cost(args, spec).as_dict()
+    return settings
 
 
 def _cbf_training_snapshot(namespace: dict[str, Any]) -> dict[str, Any]:
@@ -1333,6 +1392,11 @@ def _base_environment(
 ) -> gym.Env:
     _ensure_ppo_observation_variant(namespace, env_config)
     reward_wrapper = wrap_reward_variants(namespace["KaralakouRewardWrapper"], reward_config)
+    if resolve_drop_ego_speed_slot(env_config):
+        # Outermost, so it deletes the slot after the base wrapper has written
+        # the ego y, target y and target speed features and before the
+        # previous-action features are appended.
+        reward_wrapper = make_drop_ego_speed_slot_wrapper(reward_wrapper, env_config)
     env = gym.make(
         "lane-free-v0", render_mode=None, config=copy.deepcopy(env_config)
     )
@@ -1366,6 +1430,7 @@ def make_ppo_cbf_env(
     dense_hocbf_lambda: float = 0.0,
     dense_hocbf_tau: float = 0.5,
     dense_hocbf_w: float = 0.25,
+    state_cost: StateCostParameters | None = None,
     monitor_path: Path | None = None,
 ) -> gym.Env:
     """Build the shared physical-action/context environment for every level."""
@@ -1396,6 +1461,7 @@ def make_ppo_cbf_env(
         dense_hocbf_lambda=float(dense_hocbf_lambda),
         dense_hocbf_tau=float(dense_hocbf_tau),
         dense_hocbf_w=float(dense_hocbf_w),
+        state_cost=state_cost,
     )
     if "KPIInfoWrapper" in namespace:
         env = namespace["KPIInfoWrapper"](
@@ -1560,6 +1626,7 @@ def _make_ppo_worker_env(
     dense_hocbf_lambda: float,
     dense_hocbf_tau: float,
     dense_hocbf_w: float,
+    state_cost_config: dict[str, Any],
     monitor_path: str,
 ) -> gym.Env:
     """Create a PPO environment inside a spawned rollout worker.
@@ -1594,6 +1661,9 @@ def _make_ppo_worker_env(
         dense_hocbf_lambda=float(dense_hocbf_lambda),
         dense_hocbf_tau=float(dense_hocbf_tau),
         dense_hocbf_w=float(dense_hocbf_w),
+        # Rebuilt from plain data: the worker receives configuration, never
+        # learner-process objects.
+        state_cost=state_cost_parameters_from_mapping(state_cost_config),
         monitor_path=Path(monitor_path),
     )
 
@@ -1657,6 +1727,8 @@ def make_training_vec_env(
     dense_hocbf_lambda = float(getattr(args, "dense_hocbf_lambda", 0.0)) if dense_on else 0.0
     dense_hocbf_tau = float(getattr(args, "dense_hocbf_tau", 0.5))
     dense_hocbf_w = float(getattr(args, "dense_hocbf_w", 0.25))
+    state_cost = resolved_state_cost(args, spec)
+    state_cost_config = state_cost.as_dict()
 
     if n_envs == 1:
         def factory() -> gym.Env:
@@ -1675,6 +1747,7 @@ def make_training_vec_env(
                 dense_hocbf_lambda=dense_hocbf_lambda,
                 dense_hocbf_tau=dense_hocbf_tau,
                 dense_hocbf_w=dense_hocbf_w,
+                state_cost=state_cost,
                 monitor_path=monitor_path,
             )
 
@@ -1693,6 +1766,7 @@ def make_training_vec_env(
             "dense_hocbf_lambda": dense_hocbf_lambda,
             "dense_hocbf_tau": dense_hocbf_tau,
             "dense_hocbf_w": dense_hocbf_w,
+            "state_cost_config": copy.deepcopy(state_cost_config),
             "hocbf_reward_lambda": hocbf_reward_lambda,
             "hocbf_reward_scale": hocbf_reward_scale,
             "hocbf_reward_margin": hocbf_reward_margin,
@@ -4111,6 +4185,85 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--state-cost-lambda",
+        type=float,
+        default=0.0,
+        help=(
+            "Outer coefficient lambda_s of the margin-hinged HOCBF state cost "
+            "r_t = r_task - lambda_s * C(s_{t+1}); active only for "
+            "ppo_hocbf_state_cost_raw. Calibrate it against the base reward "
+            "rather than guessing."
+        ),
+    )
+    parser.add_argument(
+        "--state-cost-delta-h",
+        type=float,
+        nargs=2,
+        metavar=("VEHICLE", "BOUNDARY"),
+        default=list(DEFAULT_DELTA_H),
+        help=(
+            "Margins delta_h where the h hinge starts, vehicle rows then road "
+            "boundary rows. Vehicle units are the relative ellipse barrier, "
+            "boundary units are metres."
+        ),
+    )
+    parser.add_argument(
+        "--state-cost-lambda-h",
+        type=float,
+        nargs=2,
+        metavar=("VEHICLE", "BOUNDARY"),
+        default=list(DEFAULT_LAMBDA_H),
+        help="Coefficients of the squared h hinge, vehicle then boundary.",
+    )
+    parser.add_argument(
+        "--state-cost-delta-psi1",
+        type=float,
+        nargs=2,
+        metavar=("VEHICLE", "BOUNDARY"),
+        default=list(DEFAULT_DELTA_PSI1),
+        help=(
+            "Margins delta_psi1 where the psi1 hinge starts, vehicle then "
+            "boundary; psi1 = h_dot + psi1_gain * h."
+        ),
+    )
+    parser.add_argument(
+        "--state-cost-lambda-psi1",
+        type=float,
+        nargs=2,
+        metavar=("VEHICLE", "BOUNDARY"),
+        default=list(DEFAULT_LAMBDA_PSI1),
+        help="Coefficients of the squared psi1 hinge, vehicle then boundary.",
+    )
+    parser.add_argument(
+        "--state-cost-psi1-gain",
+        type=float,
+        default=DEFAULT_PSI1_GAIN,
+        help=(
+            "Gain of psi1 = h_dot + gain*h inside the state cost. Defaults to "
+            "the deployed CBF reset gain so the term and the shield agree."
+        ),
+    )
+    parser.add_argument(
+        "--drop-ego-speed-slot",
+        action="store_true",
+        help=(
+            "Remove the ego row's desired-speed observation feature, which is "
+            "a constant whenever the speed target is fixed. Narrows the "
+            "learned observation by one and is not checkpoint-compatible with "
+            "runs that keep it."
+        ),
+    )
+    parser.add_argument(
+        "--ego-desired-speed",
+        type=float,
+        default=None,
+        help=(
+            "Override the fixed ego speed target v_desired in m/s. It is both "
+            "the reward's cx normalizer and, unless dropped, the ego "
+            "observation speed feature."
+        ),
+    )
+    parser.add_argument(
         "--dense-hocbf-lambda",
         type=float,
         default=0.154,
@@ -4390,6 +4543,15 @@ def main() -> int:
             "in --variants (the ablation bypasses the architectural "
             "mu_raw -> mu_safe projection, which only those variants have)"
         )
+    if float(getattr(args, "state_cost_lambda", 0.0)) > 0.0 and not [
+        variant
+        for variant in args.variants
+        if bool(VARIANT_SPECS[variant].get("state_cost_reward", False))
+    ]:
+        raise ValueError(
+            "--state-cost-lambda has no effect without a state-cost variant "
+            "in --variants (ppo_hocbf_state_cost_raw)"
+        )
     if args.eval_seeds is None:
         args.eval_seeds = [
             int(args.eval_seed_start) + index
@@ -4555,6 +4717,22 @@ def main() -> int:
         reward_config["overtake_bonus"] = float(args.overtake_bonus)
     if args.lateral_y_weight is not None:
         reward_config["wy"] = float(args.lateral_y_weight)
+    if args.ego_desired_speed is not None:
+        speed = float(args.ego_desired_speed)
+        if not np.isfinite(speed) or speed <= 0.0:
+            raise ValueError("--ego-desired-speed must be finite and positive")
+        # The reward wrapper writes this onto the vehicle at every reset, so
+        # the reward config is authoritative. The environment mirror is kept
+        # in step only so the manifest does not record two different targets.
+        reward_config["ego_desired_speed"] = speed
+        env_config["ego_desired_speed"] = speed
+    if args.drop_ego_speed_slot:
+        if resolve_speed_target(reward_config) != "nominal":
+            raise ValueError(
+                "--drop-ego-speed-slot requires the nominal speed target; the "
+                "headway target makes that observation feature dynamic"
+            )
+        env_config["drop_ego_speed_slot"] = True
     if args.expose_target_y:
         reward_config["expose_target_y"] = True
     if args.collision_reward_override:
