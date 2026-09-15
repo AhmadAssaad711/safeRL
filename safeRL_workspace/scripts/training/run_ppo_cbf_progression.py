@@ -3444,15 +3444,20 @@ def evaluate_raw_actor_ablation(
     reward_config: dict[str, float],
     args: argparse.Namespace,
     output_dir: Path,
+    variant: str = "ppo_cbf_projected",
 ) -> pd.DataFrame:
-    """Evaluate the projected variant with its raw actor mean at deployment.
+    """Evaluate a projected variant with its raw actor mean at deployment.
 
     This is intentionally separate from the ordinary OFF/ON evaluation.  The
     ordinary ``raw`` deployment still uses ``mu_safe`` for a projected policy;
     this ablation executes ``mu_raw`` with only physical action-box clipping.
     """
 
-    variant = "ppo_cbf_projected"
+    if not bool(VARIANT_SPECS[variant]["projected_mean"]):
+        raise ValueError(
+            f"{variant} has no architectural mean projection to bypass; the "
+            "raw-actor-mean ablation only applies to projected_mean variants."
+        )
     episode_count = int(args.raw_actor_eval_episodes)
     ablation_dir = (
         output_dir / "raw_actor_ablation" / variant / f"seed_{int(training_seed)}"
@@ -4292,9 +4297,10 @@ def parse_args() -> argparse.Namespace:
         "--raw-actor-eval",
         action="store_true",
         help=(
-            "Run an additional evaluation of ppo_cbf_projected using its "
-            "raw neural-network mean mu_raw, bypassing the architectural "
-            "CBF mean projection while retaining physical action bounds."
+            "Run an additional evaluation of every requested projected_mean "
+            "variant using its raw neural-network mean mu_raw, bypassing the "
+            "architectural CBF mean projection while retaining physical "
+            "action bounds."
         ),
     )
     parser.add_argument(
@@ -4374,9 +4380,15 @@ def main() -> int:
     unknown = [variant for variant in args.variants if variant not in VARIANT_SPECS]
     if unknown:
         raise ValueError(f"Unknown PPO progression variants: {unknown}")
-    if args.raw_actor_eval and "ppo_cbf_projected" not in args.variants:
+    if args.raw_actor_eval and not [
+        variant
+        for variant in args.variants
+        if bool(VARIANT_SPECS[variant]["projected_mean"])
+    ]:
         raise ValueError(
-            "--raw-actor-eval requires ppo_cbf_projected in --variants"
+            "--raw-actor-eval requires at least one projected_mean variant "
+            "in --variants (the ablation bypasses the architectural "
+            "mu_raw -> mu_safe projection, which only those variants have)"
         )
     if args.eval_seeds is None:
         args.eval_seeds = [
@@ -5105,7 +5117,11 @@ def main() -> int:
         },
         "raw_actor_mean_ablation": {
             "enabled": bool(args.raw_actor_eval),
-            "variant": "ppo_cbf_projected",
+            "variants": [
+                variant
+                for variant in args.variants
+                if bool(VARIANT_SPECS[variant]["projected_mean"])
+            ],
             "action_source": "raw_actor_mean",
             "external_cbf": "OFF",
             "workers": int(getattr(args, "post_train_eval_workers", 1)),
@@ -5162,16 +5178,19 @@ def main() -> int:
             )
     if args.raw_actor_eval:
         for training_seed in [int(seed) for seed in args.seeds]:
-            model_path = model_paths[(training_seed, "ppo_cbf_projected")]
-            evaluate_raw_actor_ablation(
-                namespace,
-                model_path=model_path,
-                training_seed=training_seed,
-                env_config=env_config,
-                reward_config=reward_config,
-                args=args,
-                output_dir=output_dir,
-            )
+            for variant in args.variants:
+                if not bool(VARIANT_SPECS[variant]["projected_mean"]):
+                    continue
+                evaluate_raw_actor_ablation(
+                    namespace,
+                    model_path=model_paths[(training_seed, variant)],
+                    training_seed=training_seed,
+                    env_config=env_config,
+                    reward_config=reward_config,
+                    args=args,
+                    output_dir=output_dir,
+                    variant=variant,
+                )
     print(f"[ppo-progression] complete: {output_dir}", flush=True)
     return 0
 
