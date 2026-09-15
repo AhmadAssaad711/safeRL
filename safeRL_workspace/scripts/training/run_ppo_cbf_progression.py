@@ -1,4 +1,4 @@
-"""Canonical PPO progression: shield, reward feedback, and integrated CBF PPO.
+﻿"""Canonical PPO progression: shield, reward feedback, and integrated CBF PPO.
 
 The primary study is:
 
@@ -100,12 +100,10 @@ from saferl.observations import (
     resolve_drop_ego_speed_slot,
 )
 from saferl.safety.state_cost import (
-    DEFAULT_DELTA_H,
-    DEFAULT_DELTA_PSI1,
-    DEFAULT_PSI1_GAIN,
-    DEFAULT_SIGMA_H,
-    DEFAULT_SIGMA_PSI1,
+    ELLIPSE_BARRIER_FORM,
+    SUPPORTED_BARRIER_FORMS,
     StateCostParameters,
+    default_parameter_set,
     state_cost_parameters_from_mapping,
 )
 
@@ -352,13 +350,26 @@ def resolved_state_cost(
 
     if not bool(spec.get("state_cost_reward", False)):
         return StateCostParameters()
+    form = str(getattr(args, "state_cost_barrier_form", ELLIPSE_BARRIER_FORM))
+    # Vehicle margins and scales are in different units per form, so an
+    # omitted flag must fall back to that form's reference calibration rather
+    # than to the other form's numbers.
+    defaults = default_parameter_set(form)
+
+    def _pair(name: str) -> tuple[float, float]:
+        value = getattr(args, name, None)
+        key = name[len("state_cost_"):]
+        return tuple(defaults[key] if value is None else value)
+
+    gain = getattr(args, "state_cost_psi1_gain", None)
     return StateCostParameters(
         lambda_s=float(getattr(args, "state_cost_lambda", 0.0)),
-        delta_h=tuple(getattr(args, "state_cost_delta_h", DEFAULT_DELTA_H)),
-        sigma_h=tuple(getattr(args, "state_cost_sigma_h", DEFAULT_SIGMA_H)),
-        delta_psi1=tuple(getattr(args, "state_cost_delta_psi1", DEFAULT_DELTA_PSI1)),
-        sigma_psi1=tuple(getattr(args, "state_cost_sigma_psi1", DEFAULT_SIGMA_PSI1)),
-        psi1_gain=float(getattr(args, "state_cost_psi1_gain", DEFAULT_PSI1_GAIN)),
+        delta_h=_pair("state_cost_delta_h"),
+        sigma_h=_pair("state_cost_sigma_h"),
+        delta_psi1=_pair("state_cost_delta_psi1"),
+        sigma_psi1=_pair("state_cost_sigma_psi1"),
+        psi1_gain=float(defaults["psi1_gain"] if gain is None else gain),
+        barrier_form=form,
     )
 
 
@@ -4196,11 +4207,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--state-cost-barrier-form",
+        choices=SUPPORTED_BARRIER_FORMS,
+        default=ELLIPSE_BARRIER_FORM,
+        help=(
+            "Barrier the vehicle rows of the state cost are read from. "
+            "'ellipse' uses h as built, the squared relative-ellipse value, "
+            "which is quadratic in distance and first bites near 7.2 m. "
+            "'distance' reads the same geometry as a clearance in ellipse "
+            "radii, rho-1 with rate h_dot/(2 rho), which makes "
+            "--state-cost-psi1-gain a time-to-collision threshold of 1/gain "
+            "seconds. Road boundary rows are never transformed. Omitted "
+            "margins and scales fall back to the chosen form's reference "
+            "calibration, since the two are in different units."
+        ),
+    )
+    parser.add_argument(
         "--state-cost-delta-h",
         type=float,
         nargs=2,
         metavar=("VEHICLE", "BOUNDARY"),
-        default=list(DEFAULT_DELTA_H),
+        default=None,
         help=(
             "Margins delta_h where the h hinge starts, vehicle rows then road "
             "boundary rows. Vehicle units are the relative ellipse barrier, "
@@ -4212,7 +4239,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         nargs=2,
         metavar=("VEHICLE", "BOUNDARY"),
-        default=list(DEFAULT_SIGMA_H),
+        default=None,
         help=(
             "Scales of the h hinge, vehicle then boundary. Set each as "
             "delta_h - h_ref for a reference situation considered meaningfully "
@@ -4224,7 +4251,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         nargs=2,
         metavar=("VEHICLE", "BOUNDARY"),
-        default=list(DEFAULT_DELTA_PSI1),
+        default=None,
         help=(
             "Margins delta_psi1 where the psi1 hinge starts, vehicle then "
             "boundary; psi1 = h_dot + psi1_gain * h."
@@ -4235,7 +4262,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         nargs=2,
         metavar=("VEHICLE", "BOUNDARY"),
-        default=list(DEFAULT_SIGMA_PSI1),
+        default=None,
         help=(
             "Scales of the psi1 hinge, vehicle then boundary, set the same way "
             "as --state-cost-sigma-h."
@@ -4244,7 +4271,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--state-cost-psi1-gain",
         type=float,
-        default=DEFAULT_PSI1_GAIN,
+        default=None,
         help=(
             "Gain of psi1 = h_dot + gain*h inside the state cost. Defaults to "
             "the deployed CBF reset gain so the term and the shield agree."
@@ -5382,3 +5409,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

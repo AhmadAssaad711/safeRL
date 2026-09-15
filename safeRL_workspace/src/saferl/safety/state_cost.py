@@ -44,15 +44,75 @@ import numpy as np
 VEHICLE_CLASS = "vehicle"
 BOUNDARY_CLASS = "boundary"
 
-# Reference-calibrated starting point; see the behaviour checks in
-# tests/unit/test_state_cost_behaviour.py. Vehicle values are in
-# relative-ellipse units, boundary values in metres (and m/s).
+# Barrier form used for the *vehicle* rows.
+#
+# "ellipse" keeps h as built: the squared relative-ellipse value. It is
+# quadratic in distance, so no margin can both stay quiet at 60 m and speak at
+# 30 m, and the cost first becomes non-zero near 7.2 m longitudinally.
+#
+# "distance" reads the same geometry as a clearance instead. With
+# ``rho = sqrt(h + 1)`` the separation in ellipse radii is ``rho - 1`` and its
+# rate is ``h_dot / (2 rho)``. Then
+#
+#     psi_1 = rho_dot + gain * (rho - 1) >= 0
+#         <=> clearance / closing_rate >= 1 / gain
+#
+# so the gain *is* a time-to-collision threshold: 0.3 warns below 3.33 s.
+#
+# Road boundary rows are never transformed. Their h is already a clearance in
+# metres and linear in distance, which is why that channel behaved correctly
+# under both forms.
+ELLIPSE_BARRIER_FORM = "ellipse"
+DISTANCE_BARRIER_FORM = "distance"
+SUPPORTED_BARRIER_FORMS = (ELLIPSE_BARRIER_FORM, DISTANCE_BARRIER_FORM)
+
+# Reference-calibrated starting points; see the behaviour checks in
+# tests/unit/test_state_cost_behaviour.py. Boundary values are metres and m/s
+# in both forms. Vehicle values are squared-ellipse units under "ellipse" and
+# ellipse radii (and radii/s) under "distance", so the two are not
+# interchangeable and the defaults are selected per form.
 DEFAULT_DELTA_H = (1.0, 0.5)
 DEFAULT_SIGMA_H = (1.0, 0.5)
 DEFAULT_DELTA_PSI1 = (1.0, 0.5)
 DEFAULT_SIGMA_PSI1 = (2.0, 1.0)
 DEFAULT_PSI1_GAIN = 2.3
 DEFAULT_BOUNDARY_COUNT = 2
+
+# Distance form. delta_h = 1.0 radii starts the clearance channel about one
+# ellipse radius out; sigma_h = 0.8 makes a clearance of 0.2 radii score 1.
+# delta_psi1 = 1.0 with gain 0.3 warns below a 3.33 s time to collision;
+# sigma_psi1 = 2.16 makes "12 m closing at 8 m/s" (psi_1 = -1.16) score 1.
+DISTANCE_DELTA_H = (1.0, 0.5)
+DISTANCE_SIGMA_H = (0.8, 0.5)
+DISTANCE_DELTA_PSI1 = (1.0, 0.5)
+DISTANCE_SIGMA_PSI1 = (2.16, 1.0)
+DISTANCE_PSI1_GAIN = 0.3
+
+
+def default_parameter_set(barrier_form: str) -> dict[str, Any]:
+    """Return the reference-calibrated defaults for one barrier form."""
+
+    form = str(barrier_form).strip().lower()
+    if form == DISTANCE_BARRIER_FORM:
+        return {
+            "delta_h": DISTANCE_DELTA_H,
+            "sigma_h": DISTANCE_SIGMA_H,
+            "delta_psi1": DISTANCE_DELTA_PSI1,
+            "sigma_psi1": DISTANCE_SIGMA_PSI1,
+            "psi1_gain": DISTANCE_PSI1_GAIN,
+        }
+    if form == ELLIPSE_BARRIER_FORM:
+        return {
+            "delta_h": DEFAULT_DELTA_H,
+            "sigma_h": DEFAULT_SIGMA_H,
+            "delta_psi1": DEFAULT_DELTA_PSI1,
+            "sigma_psi1": DEFAULT_SIGMA_PSI1,
+            "psi1_gain": DEFAULT_PSI1_GAIN,
+        }
+    raise ValueError(
+        f"Unsupported barrier_form {barrier_form!r}; expected one of "
+        f"{SUPPORTED_BARRIER_FORMS}"
+    )
 
 
 def _pair(value: Any, name: str) -> tuple[float, float]:
@@ -76,11 +136,20 @@ class StateCostParameters:
     sigma_psi1: tuple[float, float] = DEFAULT_SIGMA_PSI1
     psi1_gain: float = DEFAULT_PSI1_GAIN
     boundary_count: int = DEFAULT_BOUNDARY_COUNT
+    barrier_form: str = ELLIPSE_BARRIER_FORM
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lambda_s", float(self.lambda_s))
         object.__setattr__(self, "psi1_gain", float(self.psi1_gain))
         object.__setattr__(self, "boundary_count", int(self.boundary_count))
+        object.__setattr__(
+            self, "barrier_form", str(self.barrier_form).strip().lower()
+        )
+        if self.barrier_form not in SUPPORTED_BARRIER_FORMS:
+            raise ValueError(
+                f"Unsupported barrier_form {self.barrier_form!r}; expected one "
+                f"of {SUPPORTED_BARRIER_FORMS}"
+            )
         for name in ("delta_h", "sigma_h", "delta_psi1", "sigma_psi1"):
             object.__setattr__(self, name, _pair(getattr(self, name), name))
 
@@ -110,6 +179,7 @@ class StateCostParameters:
             "lambda_s": self.lambda_s,
             "psi1_gain": self.psi1_gain,
             "boundary_count": self.boundary_count,
+            "barrier_form": self.barrier_form,
             "delta_h_vehicle": self.delta_h[0],
             "delta_h_boundary": self.delta_h[1],
             "sigma_h_vehicle": self.sigma_h[0],
@@ -171,6 +241,19 @@ def barrier_state_cost(
         )
     boundary_count = min(int(params.boundary_count), int(h_values.size))
 
+    if params.barrier_form == DISTANCE_BARRIER_FORM:
+        # Vehicle rows only: read the ellipse as a clearance in radii. Boundary
+        # rows are already a clearance in metres and are left untouched.
+        vehicle_slice = slice(0, h_values.size - boundary_count)
+        h_values = h_values.copy()
+        h_dot_values = h_dot_values.copy()
+        vehicle_h = h_values[vehicle_slice]
+        # h = (dx/A)^2 + (dy/B)^2 - 1 >= -1, so rho >= 0; clamp only guards the
+        # coincident-centre singularity of rho_dot.
+        rho = np.sqrt(np.maximum(vehicle_h + 1.0, 1e-9))
+        h_dot_values[vehicle_slice] = h_dot_values[vehicle_slice] / (2.0 * rho)
+        h_values[vehicle_slice] = rho - 1.0
+
     psi1 = h_dot_values + float(params.psi1_gain) * h_values
     delta_h = _class_vector(h_values.size, boundary_count, *params.delta_h)
     sigma_h = _class_vector(h_values.size, boundary_count, *params.sigma_h)
@@ -206,24 +289,27 @@ def state_cost_parameters_from_mapping(
 
     if not config:
         return StateCostParameters()
+    form = str(config.get("barrier_form", ELLIPSE_BARRIER_FORM))
+    defaults = default_parameter_set(form)
     return StateCostParameters(
         lambda_s=float(config.get("lambda_s", 0.0)),
         delta_h=(
-            float(config.get("delta_h_vehicle", DEFAULT_DELTA_H[0])),
-            float(config.get("delta_h_boundary", DEFAULT_DELTA_H[1])),
+            float(config.get("delta_h_vehicle", defaults["delta_h"][0])),
+            float(config.get("delta_h_boundary", defaults["delta_h"][1])),
         ),
         sigma_h=(
-            float(config.get("sigma_h_vehicle", DEFAULT_SIGMA_H[0])),
-            float(config.get("sigma_h_boundary", DEFAULT_SIGMA_H[1])),
+            float(config.get("sigma_h_vehicle", defaults["sigma_h"][0])),
+            float(config.get("sigma_h_boundary", defaults["sigma_h"][1])),
         ),
         delta_psi1=(
-            float(config.get("delta_psi1_vehicle", DEFAULT_DELTA_PSI1[0])),
-            float(config.get("delta_psi1_boundary", DEFAULT_DELTA_PSI1[1])),
+            float(config.get("delta_psi1_vehicle", defaults["delta_psi1"][0])),
+            float(config.get("delta_psi1_boundary", defaults["delta_psi1"][1])),
         ),
         sigma_psi1=(
-            float(config.get("sigma_psi1_vehicle", DEFAULT_SIGMA_PSI1[0])),
-            float(config.get("sigma_psi1_boundary", DEFAULT_SIGMA_PSI1[1])),
+            float(config.get("sigma_psi1_vehicle", defaults["sigma_psi1"][0])),
+            float(config.get("sigma_psi1_boundary", defaults["sigma_psi1"][1])),
         ),
-        psi1_gain=float(config.get("psi1_gain", DEFAULT_PSI1_GAIN)),
+        psi1_gain=float(config.get("psi1_gain", defaults["psi1_gain"])),
         boundary_count=int(config.get("boundary_count", DEFAULT_BOUNDARY_COUNT)),
+        barrier_form=form,
     )

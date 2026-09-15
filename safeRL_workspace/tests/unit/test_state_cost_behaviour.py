@@ -32,7 +32,11 @@ import numpy as np
 import pytest
 
 from scripts.common.cbf_geometry import batch_pairwise_hocbf_constraints
-from saferl.safety.state_cost import StateCostParameters, barrier_state_cost
+from saferl.safety.state_cost import (
+    VEHICLE_CLASS,
+    StateCostParameters,
+    barrier_state_cost,
+)
 
 K0 = 4.0
 K1 = 8.5
@@ -184,3 +188,95 @@ def test_a_wall_approached_costs_more_than_a_wall_driven_parallel_to():
     # channel is rate-blind, and psi_1 is already outside its margin in both
     # cases, so the two score identically. Recorded rather than asserted away.
     assert wall_cost(0.4, -1.0) <= parallel
+
+
+# ---------------------------------------------------------------------------
+# The same four checks against the distance barrier form, where the gain is a
+# time-to-collision threshold. These must pass outright: the whole point of
+# that form is to satisfy the acceptance table the ellipse form cannot.
+# ---------------------------------------------------------------------------
+
+DISTANCE_PARAMS = StateCostParameters(
+    lambda_s=1.0,
+    delta_h=(1.0, 0.5),
+    sigma_h=(0.8, 0.5),
+    delta_psi1=(1.0, 0.5),
+    sigma_psi1=(2.16, 1.0),
+    psi1_gain=0.3,
+    boundary_count=2,
+    barrier_form="distance",
+)
+
+
+def _distance_cost(dx: float, closing: float, dy: float = 0.0) -> float:
+    h, h_dot = _vehicle_barrier(dx, dy, closing)
+    boundary_h = [0.5 * ROAD_WIDTH - EGO_HALF_WIDTH] * 2
+    cost, _ = barrier_state_cost(
+        np.asarray([h, *boundary_h]),
+        np.asarray([h_dot, 0.0, 0.0]),
+        DISTANCE_PARAMS,
+    )
+    return cost
+
+
+def test_distance_form_leaves_ordinary_driving_alone():
+    assert _distance_cost(dx=60.0, closing=0.0) == pytest.approx(0.0)
+    assert _distance_cost(dx=40.0, closing=2.0) == pytest.approx(0.0)
+    assert _distance_cost(dx=12.0, closing=-6.0) == pytest.approx(0.0)
+
+
+def test_distance_form_warns_early_and_keeps_rising():
+    approach = [
+        _distance_cost(dx=distance, closing=6.0)
+        for distance in (30.0, 25.0, 20.0, 15.0)
+    ]
+    assert approach[0] > 0.0, "no warning at 30 m while closing at 6 m/s"
+    assert all(later > earlier for earlier, later in zip(approach, approach[1:]))
+
+
+def test_distance_form_is_large_when_close_and_closing():
+    close = _distance_cost(dx=6.0, closing=6.0)
+    moderate = _distance_cost(dx=25.0, closing=6.0)
+    assert close > 1.0
+    assert close > 5.0 * moderate
+
+
+def test_distance_form_falls_through_a_braking_recovery():
+    """The check the ellipse form cannot satisfy at any margin or scale."""
+
+    recovery = [
+        _distance_cost(dx=12.0, closing=8.0),
+        _distance_cost(dx=11.0, closing=5.0),
+        _distance_cost(dx=10.4, closing=2.5),
+        _distance_cost(dx=10.1, closing=0.5),
+    ]
+    assert all(
+        later < earlier for earlier, later in zip(recovery, recovery[1:])
+    ), f"cost did not fall while braking succeeded: {recovery}"
+
+
+def test_the_gain_is_a_time_to_collision_threshold():
+    """psi_1 >= 0 exactly when clearance/closing_rate >= 1/gain."""
+
+    import math
+
+    from saferl.safety.state_cost import barrier_state_cost as cost_fn
+
+    gain = float(DISTANCE_PARAMS.psi1_gain)
+    for dx, closing in ((30.0, 6.0), (20.0, 6.0), (12.0, 8.0)):
+        h, h_dot = _vehicle_barrier(dx, 0.0, closing)
+        rho = math.sqrt(h + 1.0)
+        clearance = rho - 1.0
+        rate = -h_dot / (2.0 * rho)
+        time_to_contact = clearance / rate
+        psi1 = -rate + gain * clearance
+        assert (psi1 >= 0.0) == (time_to_contact >= 1.0 / gain)
+        # And the cost engine agrees with the hand computation.
+        boundary_h = [0.5 * ROAD_WIDTH - EGO_HALF_WIDTH] * 2
+        _cost_value, diagnostics = cost_fn(
+            np.asarray([h, *boundary_h]),
+            np.asarray([h_dot, 0.0, 0.0]),
+            DISTANCE_PARAMS,
+        )
+        if diagnostics["argmax_class"] == VEHICLE_CLASS:
+            assert diagnostics["argmax_psi1"] == pytest.approx(psi1, rel=1e-6)
