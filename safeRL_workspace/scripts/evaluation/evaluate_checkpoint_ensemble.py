@@ -66,6 +66,37 @@ def _checkpoint_step(path: Path) -> int:
     return int(match.group(1)) if match else -1
 
 
+def select_checkpoint_steps(run_dir: Path, steps: list[int]) -> list[tuple[str, Path]]:
+    """Return the checkpoints at exactly ``steps``, oldest first.
+
+    Used to sample *across* training rather than only at the end, which is what
+    turns this from a de-noised final estimate into a deterministic learning
+    curve: the honest convergence test is whether the evaluation KPI has stopped
+    moving between consecutive checkpoints, not whether the noisy training
+    episode length has.
+
+    A missing step is an error rather than a silent omission, so a curve can
+    never be read as flat merely because a point failed to load.
+    """
+
+    selected: list[tuple[str, Path]] = []
+    for step in sorted({int(value) for value in steps}):
+        path = run_dir / "checkpoints" / f"rollout_{step}_steps.zip"
+        if not path.is_file():
+            available = sorted(
+                _checkpoint_step(p)
+                for p in (run_dir / "checkpoints").glob("rollout_*_steps.zip")
+            )
+            raise FileNotFoundError(
+                f"No checkpoint at step {step} under {run_dir}; available: "
+                + ", ".join(str(value) for value in available)
+            )
+        selected.append((f"step_{step}", path))
+    if not selected:
+        raise ValueError("--checkpoint-steps requires at least one step")
+    return selected
+
+
 def select_checkpoints(run_dir: Path, count: int) -> list[tuple[str, Path]]:
     """Return the newest ``count`` distinct policies, newest first."""
 
@@ -155,7 +186,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--project-root", type=Path, default=None)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--checkpoints", type=int, default=DEFAULT_CHECKPOINTS)
+    parser.add_argument(
+        "--checkpoints",
+        type=int,
+        default=None,
+        help=(
+            "Evaluate the newest N distinct policies, model_final included "
+            f"(default {DEFAULT_CHECKPOINTS}). De-noises the final estimate."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-steps",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="STEP",
+        help=(
+            "Evaluate the checkpoints at exactly these training steps, e.g. "
+            "250000 500000 750000 1000000, producing a deterministic learning "
+            "curve. Mutually exclusive with --checkpoints; a missing step is "
+            "an error."
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=DEFAULT_EPISODES)
     parser.add_argument("--seed-start", type=int, default=DEFAULT_SEED_START)
     parser.add_argument("--workers", type=int, default=1)
@@ -163,7 +215,12 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
-    if int(args.checkpoints) < 1:
+    if args.checkpoints is not None and args.checkpoint_steps is not None:
+        raise ValueError(
+            "--checkpoints and --checkpoint-steps are mutually exclusive: the "
+            "first de-noises the end of training, the second samples across it"
+        )
+    if args.checkpoints is not None and int(args.checkpoints) < 1:
         raise ValueError("--checkpoints must be at least 1")
 
     project_root = progression.protocol.find_project_root(
@@ -180,7 +237,13 @@ def main() -> int:
     )
     namespace = build_namespace(project_root, run_config)
 
-    selected = select_checkpoints(run_dir, int(args.checkpoints))
+    if args.checkpoint_steps is not None:
+        selected = select_checkpoint_steps(run_dir, list(args.checkpoint_steps))
+    else:
+        selected = select_checkpoints(
+            run_dir,
+            DEFAULT_CHECKPOINTS if args.checkpoints is None else int(args.checkpoints),
+        )
     print(
         f"[ensemble] {run_config['variant']} seed "
         f"{run_config['training_signature']['training_seed']}: "

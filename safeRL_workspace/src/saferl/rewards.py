@@ -96,6 +96,24 @@ DEFAULT_LATERAL_FIELD_HYSTERESIS = 0.0
 DEFAULT_LATERAL_FIELD_WALL_WEIGHT = 0.0
 DEFAULT_LATERAL_FIELD_WALL_SIGMA_M = 0.9
 
+# Control effort. The notebook reward already penalises jerk, but only as
+# ``jerk_penalty_weight * tanh(jerk_norm / jerk_scale)``, which is bounded by
+# the weight itself: 0.02 at the default, against a base reward near 0.44. The
+# measured penalty on trained policies is 0.6-1.1% of the reward, and at a jerk
+# norm of 5.6 the tanh is already at 0.51, so the term has almost no gradient
+# left. Jerk is therefore effectively unregulated, and 1M policies use roughly
+# three times the lateral acceleration of 250k ones (mean |a_y| 0.41 -> 1.22)
+# while action saturation climbs to 0.11 late in training.
+#
+# This penalises the *magnitude* of the applied acceleration rather than its
+# rate, quadratically and in normalized units, so it has gradient everywhere and
+# pushes directly against saturation:
+#
+#     control_effort = weight * mean_i (a_i / a_i_max)^2
+#
+# Default 0.0 keeps the historical reward; the term is opt-in.
+DEFAULT_CONTROL_EFFORT_WEIGHT = 0.0
+
 ALL_LATERAL_BLOCKERS = "all"
 CLOSING_LATERAL_BLOCKERS = "closing"
 CLOSING_FORWARD_LATERAL_BLOCKERS = "closing_forward"
@@ -308,6 +326,59 @@ def linear_reward_terms(
         "event_reward": event,
         "reward": tracking + progress - jerk + event,
     }
+
+
+def control_effort_weight(reward_config: Mapping[str, Any]) -> float:
+    """Return the validated control-effort weight; 0 disables the term."""
+
+    weight = float(reward_config.get("control_effort_weight", DEFAULT_CONTROL_EFFORT_WEIGHT))
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError("control_effort_weight must be finite and >= 0")
+    return weight
+
+
+def make_control_effort_wrapper(base_wrapper: type) -> type:
+    """Subclass a reward wrapper so applied acceleration magnitude is penalised.
+
+    Uses the same applied acceleration the jerk term reads, normalized by the
+    configured action bounds so both axes contribute on one scale:
+
+        control_effort = weight * mean_i (a_i / a_i_max)^2
+
+    Quadratic rather than bounded on purpose. The existing jerk penalty
+    saturates through a ``tanh`` and stops producing gradient exactly where the
+    control is most violent; this keeps pushing, and because it acts on
+    magnitude rather than rate it reduces action saturation as well as jerk.
+
+    Applied after the base reward so the component breakdown still sums to the
+    returned reward.
+    """
+
+    class ControlEffortRewardWrapper(base_wrapper):  # type: ignore[misc, valid-type]
+        def _karalakou_reward(self, previous_dx, previous_ego_x=None):
+            reward, components = super()._karalakou_reward(previous_dx, previous_ego_x)
+            weight = control_effort_weight(self.reward_config)
+            bounds = self.base_env.config["bounds"]
+            ax_max = max(abs(float(bounds["ax_min"])), abs(float(bounds["ax_max"])), 1e-6)
+            ay_max = max(abs(float(bounds["ay_min"])), abs(float(bounds["ay_max"])), 1e-6)
+            applied = self._current_applied_acceleration()
+            normalized = numpy.asarray(
+                [float(applied[0]) / ax_max, float(applied[1]) / ay_max], dtype=float
+            )
+            effort = float(numpy.mean(numpy.square(normalized)))
+            penalty = weight * effort
+            components = dict(components)
+            components["control_effort"] = effort
+            components["control_effort_weight"] = weight
+            components["control_effort_penalty"] = penalty
+            components["reward_before_control_effort"] = float(reward)
+            total = float(reward) - penalty
+            components["reward"] = total
+            return total, components
+
+    ControlEffortRewardWrapper.__module__ = __name__
+    ControlEffortRewardWrapper.__name__ = "ControlEffortRewardWrapper"
+    return ControlEffortRewardWrapper
 
 
 def make_linear_reward_wrapper(base_wrapper: type) -> type:
@@ -846,6 +917,10 @@ def wrap_reward_variants(base_wrapper: type, reward_config: Mapping[str, Any]) -
         wrapper = make_headway_speed_target_wrapper(wrapper)
     if resolve_reward_mode(reward_config) == LINEAR_REWARD_MODE:
         wrapper = make_linear_reward_wrapper(wrapper)
+    # Outermost: it subtracts from whichever total the modes above produced, so
+    # the component breakdown still sums to the returned reward in both modes.
+    if control_effort_weight(reward_config) > 0.0:
+        wrapper = make_control_effort_wrapper(wrapper)
     return wrapper
 
 
@@ -1019,6 +1094,18 @@ def add_reward_variant_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--control-effort-weight",
+        type=float,
+        default=None,
+        help=(
+            "Weight of a quadratic penalty on applied acceleration magnitude, "
+            "mean_i (a_i/a_i_max)^2. Unlike the notebook jerk term it does not "
+            "saturate, and it acts on magnitude rather than rate, so it "
+            "reduces action saturation as well as jerk. Omitted keeps the "
+            "notebook reward."
+        ),
+    )
+    parser.add_argument(
         "--potential-field-weight",
         type=float,
         default=None,
@@ -1080,6 +1167,12 @@ def apply_reward_variant_arguments(args: argparse.Namespace, reward_config: dict
                 f"--{name.replace('_', '-')} has no effect without --lateral-target field"
             )
         reward_config[name] = float(value)
+    control_effort = getattr(args, "control_effort_weight", None)
+    if control_effort is not None:
+        weight = float(control_effort)
+        if not math.isfinite(weight) or weight < 0.0:
+            raise ValueError("--control-effort-weight must be finite and >= 0")
+        reward_config["control_effort_weight"] = weight
     potential_field_weight = getattr(args, "potential_field_weight", None)
     if potential_field_weight is not None:
         weight = float(potential_field_weight)
