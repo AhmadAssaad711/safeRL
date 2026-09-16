@@ -1,4 +1,4 @@
-﻿"""Canonical PPO progression: shield, reward feedback, and integrated CBF PPO.
+"""Canonical PPO progression: shield, reward feedback, and integrated CBF PPO.
 
 The primary study is:
 
@@ -96,8 +96,17 @@ from saferl.rewards import (
     wrap_reward_variants,
 )
 from saferl.observations import (
+    DEFAULT_STATE_COST_FEATURE_CLIP,
+    STATE_COST_FEATURE_CLIP_KEY,
+    STATE_COST_FEATURE_COUNT,
+    STATE_COST_FEATURE_NAMES,
+    STATE_COST_FEATURE_PARAMS_KEY,
+    STATE_COST_OBSERVE_KEY,
     make_drop_ego_speed_slot_wrapper,
     resolve_drop_ego_speed_slot,
+    resolve_state_cost_feature_clip,
+    resolve_state_cost_feature_params,
+    resolve_state_cost_observe,
 )
 from saferl.safety.state_cost import (
     ELLIPSE_BARRIER_FORM,
@@ -335,7 +344,11 @@ def _base_observation_dim(env_config: dict[str, Any]) -> int:
     # The ego row's desired-speed slot is removable when the speed target is a
     # fixed constant; see saferl.observations.
     base -= 1 if resolve_drop_ego_speed_slot(env_config) else 0
-    return base + (2 if bool(env_config.get("ppo_append_previous_action", False)) else 0)
+    base += 2 if bool(env_config.get("ppo_append_previous_action", False)) else 0
+    # The state cost's two hinge terms, when exposed to the policy. Additive on
+    # top of the existing layout, so 41D at neighbors_count 7 becomes 43D.
+    base += STATE_COST_FEATURE_COUNT if resolve_state_cost_observe(env_config) else 0
+    return base
 
 
 def resolved_state_cost(
@@ -346,9 +359,16 @@ def resolved_state_cost(
     Variants that do not declare ``state_cost_reward`` get ``lambda_s = 0``,
     which is an exact off-switch, so the term can never leak into a control
     arm or into evaluation.
+
+    The margins, scales, gain and barrier form are resolved the same way for
+    every variant once ``--state-cost-observe`` is set, because the observation
+    features are built from them: a control arm that exposed the features under
+    different margins would be describing different risk from the treatment arm
+    and would stop being its control. Only ``lambda_s`` distinguishes the arms.
     """
 
-    if not bool(spec.get("state_cost_reward", False)):
+    observing = bool(getattr(args, "state_cost_observe", False))
+    if not bool(spec.get("state_cost_reward", False)) and not observing:
         return StateCostParameters()
     form = str(getattr(args, "state_cost_barrier_form", ELLIPSE_BARRIER_FORM))
     # Vehicle margins and scales are in different units per form, so an
@@ -362,8 +382,14 @@ def resolved_state_cost(
         return tuple(defaults[key] if value is None else value)
 
     gain = getattr(args, "state_cost_psi1_gain", None)
+    # The reward term is what the variant spec gates; the features are not.
+    lambda_s = (
+        float(getattr(args, "state_cost_lambda", 0.0))
+        if bool(spec.get("state_cost_reward", False))
+        else 0.0
+    )
     return StateCostParameters(
-        lambda_s=float(getattr(args, "state_cost_lambda", 0.0)),
+        lambda_s=lambda_s,
         delta_h=_pair("state_cost_delta_h"),
         sigma_h=_pair("state_cost_sigma_h"),
         delta_psi1=_pair("state_cost_delta_psi1"),
@@ -1444,7 +1470,15 @@ def make_ppo_cbf_env(
     state_cost: StateCostParameters | None = None,
     monitor_path: Path | None = None,
 ) -> gym.Env:
-    """Build the shared physical-action/context environment for every level."""
+    """Build the shared physical-action/context environment for every level.
+
+    Whether the state cost's hinge terms are exposed to the policy, and under
+    which margins, is read from ``env_config`` rather than passed separately.
+    Every caller already supplies the resolved environment configuration, so
+    training workers, evaluation and later re-evaluation from a saved
+    ``run_config.json`` all agree on the observation layout without threading
+    another argument through a dozen call sites.
+    """
 
     env = _base_environment(
         namespace, env_config=env_config, reward_config=reward_config
@@ -1473,6 +1507,13 @@ def make_ppo_cbf_env(
         dense_hocbf_tau=float(dense_hocbf_tau),
         dense_hocbf_w=float(dense_hocbf_w),
         state_cost=state_cost,
+        state_cost_observe=resolve_state_cost_observe(env_config),
+        state_cost_feature_clip=resolve_state_cost_feature_clip(env_config),
+        state_cost_feature_params=(
+            resolve_state_cost_feature_params(env_config, state_cost)
+            if resolve_state_cost_observe(env_config)
+            else None
+        ),
     )
     if "KPIInfoWrapper" in namespace:
         env = namespace["KPIInfoWrapper"](
@@ -4288,6 +4329,31 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--state-cost-observe",
+        action="store_true",
+        help=(
+            "Expose the state cost's two hinge terms -- the squared hinged "
+            "margins on h and on psi1 at the worst constraint, whose sum is "
+            "C(s) -- to the policy as observation features. Computed from the "
+            "current state, not the post-step state the reward is charged on. "
+            "Independent of --state-cost-lambda, so a control arm can see the "
+            "features without being charged for them; that pair is what "
+            "separates 'can see risk' from 'penalised for risk'. Widens the "
+            "observation by two and is not checkpoint-compatible with runs "
+            "that omit it."
+        ),
+    )
+    parser.add_argument(
+        "--state-cost-feature-clip",
+        type=float,
+        default=DEFAULT_STATE_COST_FEATURE_CLIP,
+        help=(
+            "Upper bound on each observed hinge term. They are squared and "
+            "unbounded above, so without a clip one near-collision saturates "
+            "the Tanh policy's first layer. Recorded in the manifest."
+        ),
+    )
+    parser.add_argument(
         "--ego-desired-speed",
         type=float,
         default=None,
@@ -4767,6 +4833,22 @@ def main() -> int:
                 "headway target makes that observation feature dynamic"
             )
         env_config["drop_ego_speed_slot"] = True
+    if args.state_cost_observe:
+        # The features are a property of the observation, so they live in the
+        # environment config: that is what the training workers, the evaluation
+        # env and any later re-evaluation from a saved run_config all read, so
+        # none of them can disagree about the layout. It also puts the feature
+        # definition in the manifest and in the training signature, which is
+        # what stops a 41D checkpoint being reused for a 43D run.
+        env_config[STATE_COST_OBSERVE_KEY] = True
+        env_config[STATE_COST_FEATURE_CLIP_KEY] = float(args.state_cost_feature_clip)
+        # Resolved with lambda_s = 0 and an empty variant spec, so the margins
+        # are identical in the arm that only observes and the arm that is also
+        # charged. Only lambda_s separates them.
+        env_config[STATE_COST_FEATURE_PARAMS_KEY] = resolved_state_cost(
+            args, {}
+        ).as_dict()
+        env_config["state_cost_feature_names"] = list(STATE_COST_FEATURE_NAMES)
     if args.expose_target_y:
         reward_config["expose_target_y"] = True
     if args.collision_reward_override:

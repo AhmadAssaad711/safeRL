@@ -30,6 +30,11 @@ from scripts.common.cbf_projection import (
     project_polytope_2d_numpy,
 )
 from scripts.common.cbf_ray_mask import build_cbf_action_constraints
+from saferl.observations import (
+    DEFAULT_STATE_COST_FEATURE_CLIP,
+    STATE_COST_FEATURE_COUNT,
+    state_cost_observation_features,
+)
 from saferl.safety.state_cost import StateCostParameters, barrier_state_cost
 
 
@@ -85,6 +90,9 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         dense_hocbf_tau: float = 0.5,
         dense_hocbf_w: float = 0.25,
         state_cost: Optional[StateCostParameters] = None,
+        state_cost_observe: bool = False,
+        state_cost_feature_clip: float = DEFAULT_STATE_COST_FEATURE_CLIP,
+        state_cost_feature_params: Optional[StateCostParameters] = None,
     ) -> None:
         super().__init__(env)
         self.namespace = namespace
@@ -120,6 +128,21 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
             if not isinstance(env.observation_space, gym.spaces.Box):
                 raise TypeError("Projected PPO currently requires a flat Box observation")
             base_observation_dim = int(np.prod(env.observation_space.shape))
+        # The state-cost features belong to the *base* observation, not to the
+        # CBF context: the policy's feature extractor slices the observation to
+        # base_observation_dim, so anything appended past that boundary is
+        # invisible to the network. Widening the base is what puts them in front
+        # of the policy. Default off, so every historical layout is unchanged.
+        self.state_cost_observe = bool(state_cost_observe)
+        self.state_cost_feature_clip = float(state_cost_feature_clip)
+        # Separate from the reward's state cost on purpose: evaluation runs with
+        # the penalty off (lambda_s = 0) but must still rebuild the features from
+        # the margins training used, or the observation would keep its width and
+        # silently change its meaning.
+        self.state_cost_feature_params = state_cost_feature_params
+        self._inner_observation_dim = int(base_observation_dim)
+        if self.state_cost_observe:
+            base_observation_dim = int(base_observation_dim) + STATE_COST_FEATURE_COUNT
         self.layout = CBFContextLayout(
             base_observation_dim=int(base_observation_dim),
             max_constraints=int(max_constraints),
@@ -177,13 +200,29 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
         )
         if not isinstance(env.observation_space, gym.spaces.Box):
             raise TypeError("Projected PPO currently requires a flat Box observation")
-        if int(np.prod(env.observation_space.shape)) != self.layout.base_observation_dim:
+        if int(np.prod(env.observation_space.shape)) != self._inner_observation_dim:
             raise ValueError(
                 "Base observation width disagrees with the CBF context layout: "
-                f"{env.observation_space.shape} vs {self.layout.base_observation_dim}"
+                f"{env.observation_space.shape} vs {self._inner_observation_dim}"
             )
         base_low = np.asarray(env.observation_space.low, dtype=np.float32).reshape(-1)
         base_high = np.asarray(env.observation_space.high, dtype=np.float32).reshape(-1)
+        if self.state_cost_observe:
+            # Bounded by construction, unlike the context rows, so declare the
+            # real range rather than an infinite one.
+            base_low = np.concatenate(
+                [base_low, np.zeros(STATE_COST_FEATURE_COUNT, dtype=np.float32)]
+            )
+            base_high = np.concatenate(
+                [
+                    base_high,
+                    np.full(
+                        STATE_COST_FEATURE_COUNT,
+                        self.state_cost_feature_clip,
+                        dtype=np.float32,
+                    ),
+                ]
+            )
         context_width = self.layout.observation_dim - self.layout.base_observation_dim
         self.observation_space = gym.spaces.Box(
             low=np.concatenate(
@@ -244,11 +283,45 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
     ) -> np.ndarray:
         system = self._constraint_system() if system is None else system
         self._last_system = system
+        if self.state_cost_observe:
+            # Computed from this same system, which describes the current state.
+            # The reward's copy of the cost is evaluated on the post-step system
+            # instead, so reusing that value here would leak s(t+1) into the
+            # policy input.
+            observation = np.concatenate(
+                [
+                    np.asarray(observation, dtype=np.float32).reshape(-1),
+                    self._state_cost_features(system),
+                ]
+            )
         return append_cbf_context(
             observation,
             system["rows"],
             system["bounds"],
             layout=self.layout,
+        )
+
+    def _state_cost_features(self, system: dict[str, Any]) -> np.ndarray:
+        """The state cost's two hinge terms for one constraint system."""
+
+        h = np.asarray(system.get("barrier_h", ()), dtype=float)
+        h_dot = np.asarray(system.get("barrier_h_dot", ()), dtype=float)
+        if h.size == 0 or h_dot.size != h.size:
+            # Matching the reward's handling: h_dot is missing only on the
+            # non-batch geometry path, and silently zeroed safety features would
+            # be worse than a hard failure because the policy would train
+            # against a constant.
+            raise RuntimeError(
+                "state-cost observation features require per-barrier h_dot from "
+                "batch_pairwise_hocbf_constraints"
+            )
+        params = (
+            self.state_cost_feature_params
+            if self.state_cost_feature_params is not None
+            else self.state_cost
+        )
+        return state_cost_observation_features(
+            h, h_dot, params, self.state_cost_feature_clip
         )
 
     def current_constraint_system(self) -> dict[str, Any]:
