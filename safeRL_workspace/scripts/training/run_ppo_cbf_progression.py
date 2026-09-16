@@ -27,6 +27,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import multiprocessing as mp
 import os
 import re
@@ -38,7 +39,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 # Twenty vectorized simulator workers provide the canonical CPU
 # parallelism.  Set these before NumPy/PyTorch import so one BLAS/OpenMP pool
@@ -1845,6 +1846,40 @@ def make_training_vec_env(
     return vec_env
 
 
+CONSTANT_LR_SCHEDULE = "constant"
+LINEAR_LR_SCHEDULE = "linear"
+SUPPORTED_LR_SCHEDULES = (CONSTANT_LR_SCHEDULE, LINEAR_LR_SCHEDULE)
+
+
+def resolved_learning_rate(config: Mapping[str, Any]) -> float | Callable[[float], float]:
+    """Return the learning rate PPO should use: a float, or a decay schedule.
+
+    Stable-Baselines3 accepts either a constant or a callable of
+    ``progress_remaining``, which runs from 1.0 at the first update to 0.0 at the
+    last. The linear schedule anneals to zero, so the final updates barely move
+    the policy and the end of training is a settled point rather than one draw
+    from a policy still taking full-size steps.
+
+    The schedule name, not the callable, is what lives in the resolved config, so
+    the config stays JSON-serialisable and the training signature keeps hashing a
+    plain value.
+    """
+
+    rate = float(config["learning_rate"])
+    schedule = str(config.get("lr_schedule", CONSTANT_LR_SCHEDULE))
+    if schedule not in SUPPORTED_LR_SCHEDULES:
+        raise ValueError(
+            f"Unsupported lr_schedule {schedule!r}; expected one of {SUPPORTED_LR_SCHEDULES}"
+        )
+    if schedule == CONSTANT_LR_SCHEDULE:
+        return rate
+
+    def linear_decay(progress_remaining: float) -> float:
+        return float(progress_remaining) * rate
+
+    return linear_decay
+
+
 def resolved_ppo_config(args: argparse.Namespace) -> dict[str, Any]:
     config = copy.deepcopy(PPO_CONFIGS[str(args.ppo_config)])
     if args.n_steps is not None:
@@ -1857,6 +1892,20 @@ def resolved_ppo_config(args: argparse.Namespace) -> dict[str, Any]:
         config["ent_coef"] = float(args.ent_coef)
     if args.gamma is not None:
         config["gamma"] = float(args.gamma)
+    if args.learning_rate is not None:
+        rate = float(args.learning_rate)
+        # Unlike ent_coef, where zero is meaningful, a non-positive learning rate
+        # silently produces a frozen policy that trains for an hour and looks
+        # like a legitimate run.
+        if not math.isfinite(rate) or rate <= 0.0:
+            raise ValueError("--learning-rate must be finite and positive")
+        config["learning_rate"] = rate
+    # Only recorded when it is not the historical constant, so every existing
+    # run's signature hash -- and therefore its checkpoint identity -- is
+    # unchanged by this option existing.
+    schedule = str(getattr(args, "lr_schedule", CONSTANT_LR_SCHEDULE))
+    if schedule != CONSTANT_LR_SCHEDULE:
+        config["lr_schedule"] = schedule
     topology = training_topology(args)
     n_envs = int(topology["n_envs"])
     rollout_size = int(config["n_steps"])
@@ -1898,7 +1947,7 @@ def build_model(
         "log_std_init": float(config["log_std_init"]),
     }
     common_model_kwargs: dict[str, Any] = {
-        "learning_rate": float(config["learning_rate"]),
+        "learning_rate": resolved_learning_rate(config),
         "n_steps": int(config["n_steps"]),
         "batch_size": int(config["batch_size"]),
         "n_epochs": int(config["n_epochs"]),
@@ -4326,6 +4375,29 @@ def parse_args() -> argparse.Namespace:
             "a constant whenever the speed target is fixed. Narrows the "
             "learned observation by one and is not checkpoint-compatible with "
             "runs that keep it."
+        ),
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help=(
+            "Override the PPO learning rate from the selected --ppo-config. The "
+            "presets are confounded -- Q1 differs from Q0 in learning rate, gamma, "
+            "ent_coef and log_std_init at once -- so this is the only way to move "
+            "one knob at a time."
+        ),
+    )
+    parser.add_argument(
+        "--lr-schedule",
+        choices=SUPPORTED_LR_SCHEDULES,
+        default=CONSTANT_LR_SCHEDULE,
+        help=(
+            "Learning-rate schedule. 'constant' is the historical behaviour and "
+            "is recorded nowhere, so existing checkpoint identities are unchanged. "
+            "'linear' anneals to zero over training, so the last updates barely "
+            "move the policy and the endpoint is settled rather than one draw "
+            "from a policy still taking full-size steps."
         ),
     )
     parser.add_argument(
