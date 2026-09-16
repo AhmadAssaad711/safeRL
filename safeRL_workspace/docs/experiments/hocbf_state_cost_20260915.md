@@ -5,6 +5,12 @@ seeds, every seed against the term. Results below; raw run data is under
 `artifacts/runs/` (gitignored, OneDrive-synced) mirrored from
 `%LOCALAPPDATA%\Temp\saferl_runs\`.
 
+> **Correction, 2026-09-16 — read this before quoting any number below.**
+> The headline "+13%, three of three seeds" was never statistically
+> established, a fourth seed changes the estimate, and the seeds are not
+> independent of each other. See "Statistical correction" at the end of this
+> document. The measurements are unchanged; their interpretation is not.
+
 ## What was tested
 
     r_t = r_task,t - lambda_s * C(s_{t+1})
@@ -184,4 +190,106 @@ studies' 567 MB of checkpoints remain only in Temp).
 3. **Control-effort 1M run** still unstarted.
 4. **TTC barrier form has one data point** (250k, v_d 20) and has never run at
    1M, despite being the only form that passes the acceptance gate.
-5. Seed 310 evaluation, if a fourth seed is wanted.
+5. Seed 310 evaluation, if a fourth seed is wanted. **Done, see below.**
+
+## Statistical correction, 2026-09-16
+
+Everything measured above stands. What was claimed from it does not.
+Reproducible via `scripts/evaluation/summarize_training_stability.py`.
+
+### The effect was never significant, and unanimity could not have made it so
+
+| | n = 3 (307-309) | n = 4 (+ seed 310) |
+| --- | ---: | ---: |
+| effect, raw collisions/km | +0.484 (+13.0%) | **+0.563 (+16.1%)** |
+| paired t | 1.85 | 2.80 |
+| p | 0.205 | **0.068** |
+| exact sign-test p | 0.250 | 0.125 |
+| paired SD | 0.453 | 0.402 |
+| detectable effect at 80% power | +37.8% | +24.0% |
+
+Seed 310 was already trained and only needed evaluating: control 2.809, ellipse
+3.609, difference +0.800. So the effect is now **4 of 4 seeds and stronger**,
+which points at something real — but it is still not significant at alpha 0.05.
+
+Two things to retire permanently:
+
+- **"Three of three seeds against the term" is not evidence.** With `n` seeds
+  agreeing, the smallest reachable two-sided sign-test p is `2/2^n` = 0.250 at
+  n = 3 and 0.125 at n = 4. A unanimous 3-seed result cannot reach 0.05 under
+  any test that respects the pairing.
+- **The earlier MDE figures were 50%-power numbers.** `t_crit * sd / sqrt(n)` is
+  the effect detected half the time. At 80% power the observed effect needs
+  **n = 9**, not the n = 4 or 6 quoted before. A pre-specified 20% relative
+  regression needs n = 6 at the measured SD, or n = 10 at a conservative one.
+
+The paired SD of 0.453 carries two degrees of freedom and its 95% CI is
+**[0.236, 2.844]** — a factor of twelve. Any seed budget planned from that point
+estimate is planned from noise; plan from the variance decomposition instead.
+
+### Variance decomposition (control arm, 4 seeds)
+
+| component | value |
+| --- | ---: |
+| within-run block SD | 1.048 |
+| evaluation-only SE of a run mean | 0.331 |
+| observed between-seed SD | 0.619 |
+| **genuine seed-to-seed SD** | **0.522** (71% of between-seed variance) |
+
+So roughly a third of the apparent seed spread is evaluation noise that more
+episodes would remove; the rest needs more seeds.
+
+### The training seeds are not independent
+
+`VecEnv.seed(s)` assigns worker seeds `s .. s+19`, and the scenario stream is a
+pure function of the worker seed: `np_random` is consumed **only** in the reset
+and spawn path (`_reset`, `_create_vehicles`, `_sample_legacy_initial_states`,
+`_sample_safe_initial_states`, `_sample_mtm_profile`,
+`_sample_mtm_aggressiveness`) and nowhere in `step`. Verified: two envs reset
+with the same seed produce byte-identical scenarios, and a whole stream replays
+identically.
+
+| shared worker seeds | 307 | 308 | 309 | 310 |
+| --- | ---: | ---: | ---: | ---: |
+| **307** | 20 | 19 | 18 | 17 |
+| **310** | 17 | 18 | 19 | 20 |
+
+The runs therefore share 17-19 of 20 scenario streams. The within-seed pairing
+is unaffected, but the paired differences are correlated through shared training
+data, so the across-seed p-value is optimistic. **Fix: space training seeds by
+at least `n_envs`** (307, 327, 347), which also means 311-313 are *not* clean
+additions to this set.
+
+### It is not an RL optimisation problem
+
+All six 1M runs, first-decile to last-decile: `approx_kl` 0.005 -> 0.009 (an
+order of magnitude under 0.02), `clip_fraction` 0.03 -> 0.09, `explained_variance`
+0.24-0.37 -> 0.66-0.79, `train/std` flat at ~0.6 against `exp(-0.5) = 0.6065`,
+i.e. within 6% of initialisation. Healthy, and **indistinguishable between the
+two arms** on every one of them. Hyperparameter tuning is not indicated.
+
+### Final-step selection is mostly, but not entirely, harmless
+
+Four late checkpoints (925k-1M), 200 episodes each, control arm; the spread
+across checkpoints corrected for within-checkpoint evaluation noise:
+
+| seed | 925k | 950k | 975k | 1M | corrected snapshot SD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 307 | 3.811 | 4.318 | 4.507 | 4.089 | 0.000 |
+| 308 | 4.236 | 4.057 | 4.142 | 4.032 | 0.000 |
+| 309 | 2.067 | 2.377 | 2.735 | 3.071 | **0.379** |
+
+Seeds 307 and 308 show no drift beyond evaluation noise. Seed 309 drifts
+monotonically worse and its 0.379 is **78% of the effect being interpreted** —
+and 309 also carries the largest ellipse-vs-control gap (+0.984), so part of
+that gap may be drift rather than the term. Pooled snapshot SD 0.219.
+
+### The whole study ran on wall-hugging policies
+
+Six of seven arms spend 72-85% of every step within half a metre of a road
+boundary, because the reward's own lateral target sits within 1.5 m of a wall
+46-47% of the time. **Seed 307, the reference for every single-seed comparison
+here, is the sole exception at 21.6%** — which is why treatments appeared to
+degrade lateral tracking and increase CBF workload. See
+`lateral_emphasis_20260916.md`; that defect is now fixed and the fix removes
+wall-hugging entirely.
