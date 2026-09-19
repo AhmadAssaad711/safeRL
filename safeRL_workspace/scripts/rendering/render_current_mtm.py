@@ -36,6 +36,16 @@ def parse_args() -> argparse.Namespace:
         metavar=("CAUTIOUS", "NORMAL", "AGGRESSIVE"),
         help="Override continuous-personality population masses.",
     )
+    parser.add_argument(
+        "--categorical-colors",
+        action="store_true",
+        help=(
+            "Disable continuous_driver_aggressiveness so each vehicle is colored "
+            "by its discrete profile bucket (cautious/normal/aggressive) instead "
+            "of a per-vehicle blend. Visualization only -- affects color and the "
+            "sampled personality distribution, not the profile-mix masses."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -91,7 +101,9 @@ def main() -> int:
         )
     # This script renders the current experiment, so opt in explicitly even
     # when the supplied signature predates the continuous-personality flag.
-    env_config.setdefault("mtm", {})["continuous_driver_aggressiveness"] = True
+    env_config.setdefault("mtm", {})["continuous_driver_aggressiveness"] = (
+        not args.categorical_colors
+    )
     if args.profile_mix is not None:
         cautious, normal, aggressive = (float(value) for value in args.profile_mix)
         if min(cautious, normal, aggressive) < 0.0:
@@ -129,7 +141,12 @@ def main() -> int:
     # Step at the physics frequency so collision events that begin during the
     # first half of a 10 Hz policy interval are not hidden by the second half.
     # Two 20 Hz physics steps are still combined into each 10 Hz video frame.
+    # cbf_frequency must track policy_frequency here too (resolve_frequency_plan
+    # requires cbf_frequency == policy_frequency when cbf_substep_filtering is
+    # False); the value is otherwise irrelevant since ego_controlled=False
+    # means the CBF is never invoked in this MTM-only render.
     env_config["policy_frequency"] = float(env_config["simulation_frequency"])
+    env_config["cbf_frequency"] = float(env_config["simulation_frequency"])
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
