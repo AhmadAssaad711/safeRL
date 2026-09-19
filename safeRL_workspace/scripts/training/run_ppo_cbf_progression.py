@@ -1892,6 +1892,12 @@ def resolved_ppo_config(args: argparse.Namespace) -> dict[str, Any]:
         config["ent_coef"] = float(args.ent_coef)
     if args.gamma is not None:
         config["gamma"] = float(args.gamma)
+    if getattr(args, "clip_range", None) is not None:
+        config["clip_range"] = float(args.clip_range)
+    if getattr(args, "gae_lambda", None) is not None:
+        config["gae_lambda"] = float(args.gae_lambda)
+    if getattr(args, "vf_coef", None) is not None:
+        config["vf_coef"] = float(args.vf_coef)
     if args.learning_rate is not None:
         rate = float(args.learning_rate)
         # Unlike ent_coef, where zero is meaningful, a non-positive learning rate
@@ -4073,6 +4079,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override the PPO discount factor from the selected --ppo-config.",
+    )
+    parser.add_argument(
+        "--clip-range",
+        type=float,
+        default=None,
+        help="Override the PPO clip range from the selected --ppo-config.",
+    )
+    parser.add_argument(
+        "--gae-lambda",
+        type=float,
+        default=None,
+        help="Override the GAE lambda from the selected --ppo-config.",
+    )
+    parser.add_argument(
+        "--vf-coef",
+        type=float,
+        default=None,
+        help="Override the PPO value-loss coefficient from the selected --ppo-config.",
     )
     parser.add_argument(
         "--collision-penalty",
