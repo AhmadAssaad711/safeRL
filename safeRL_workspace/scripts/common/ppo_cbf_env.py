@@ -49,6 +49,46 @@ def constraint_system_hash(rows: np.ndarray, bounds: np.ndarray) -> str:
     return digest.hexdigest()[:16]
 
 
+def binding_barrier_diagnostics(system: dict[str, Any]) -> dict[str, float]:
+    """Barrier state for the neighbour constraint carrying the smallest h.
+
+    Every field is read at the same index, which is what makes an offline
+    second-order reconstruction meaningful: psi_2 = b - A @ u and
+    hddot = psi_2 - k1*h_dot - k0*h then describe one vehicle pair. Mixing h
+    from one pair with h_dot from another silently produces a plausible but
+    meaningless trajectory, and the argmin pair does change between steps --
+    which is why the index is reported rather than assumed constant.
+
+    Only neighbour barriers are considered, matching ``min_h``; the two road
+    boundaries live at the end of ``barrier_h`` and are reported separately.
+    """
+
+    count = int(system.get("num_neighbor_constraints", 0))
+    barrier_h = np.asarray(system.get("barrier_h", ()), dtype=float)
+    barrier_h_dot = np.asarray(system.get("barrier_h_dot", ()), dtype=float)
+    missing = {
+        "cbf_min_h_index": -1,
+        "cbf_min_h_dot": float("nan"),
+        "cbf_min_row_x": float("nan"),
+        "cbf_min_row_y": float("nan"),
+        "cbf_min_bound": float("nan"),
+    }
+    if count <= 0 or barrier_h.size < count:
+        return missing
+    # h_dot is empty on the non-batch geometry path.
+    if barrier_h_dot.size < count:
+        return missing
+    index = int(np.argmin(barrier_h[:count]))
+    row = np.asarray(system["cbf_rows"][index], dtype=float)
+    return {
+        "cbf_min_h_index": index,
+        "cbf_min_h_dot": float(barrier_h_dot[index]),
+        "cbf_min_row_x": float(row[0]),
+        "cbf_min_row_y": float(row[1]),
+        "cbf_min_bound": float(system["cbf_bounds"][index]),
+    }
+
+
 class CBFContextPhysicalActionWrapper(gym.Wrapper):
     """Expose common physical actions and exact padded CBF context.
 
@@ -1119,6 +1159,7 @@ class CBFContextPhysicalActionWrapper(gym.Wrapper):
                     record["active_indices"], dtype=np.int64
                 ),
                 "cbf_min_h": float(record_system["min_h"]),
+                **binding_barrier_diagnostics(record_system),
                 "cbf_min_center_distance": float(
                     record_system["min_center_distance"]
                 ),
