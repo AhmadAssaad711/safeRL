@@ -38,7 +38,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = sys.executable
@@ -51,7 +51,8 @@ STALL_MINUTES = 25
 POLL_SECONDS = 30
 
 
-def base_args(timesteps: int, lateral_fix: bool) -> list[str]:
+def base_args(timesteps: int, lateral_fix: bool,
+              ego_desired_speed: float | None) -> list[str]:
     args = [
         "-m", "scripts.training.run_ppo_cbf_progression",
         "--traffic-model", "mtm", "--device", DEVICE, "--timesteps", str(timesteps),
@@ -80,12 +81,21 @@ def base_args(timesteps: int, lateral_fix: bool) -> list[str]:
             "--lateral-field-wall-weight", "1.0",
             "--lateral-y-weight", "0.96",
         ]
+    if ego_desired_speed is not None:
+        # v_desired is the reward's cx normalizer as well as the speed target,
+        # and wx is NOT retuned with it, so a run at another speed is not a
+        # pure speed change. Recorded in every run's manifest either way.
+        args += ["--ego-desired-speed", repr(float(ego_desired_speed))]
     return args
 
 
 # label -> variants, KPI rows required to count as done, extra CLI.
 # ``state_cost`` marks the arm whose extra flags are filled in from the
 # --state-cost-* options, because its term is the one still under development.
+# ``actor_lambda_flag`` names the arm's actor-loss safety coefficient, filled in
+# from --actor-lambda. B2 and C2 are the only arms carrying one, and they carry
+# different ones: B2's loss is the detached hard-CBF mean target, C2's is the
+# differentiable projected mean. The arms without an actor loss ignore it.
 ARMS: dict[str, dict[str, Any]] = {
     "A1_nominal": {
         "variants": ["ppo_nominal"], "need": ["ppo_nominal"], "extra": [],
@@ -98,7 +108,7 @@ ARMS: dict[str, dict[str, Any]] = {
     },
     "B2_cbf_nd_reward_actor": {
         "variants": ["ppo_cbf_nd_reward_actor"], "need": ["ppo_cbf_nd_reward_actor"],
-        "extra": [],
+        "extra": [], "actor_lambda_flag": "--lambda-detached-actor",
         "what": "CBF in training + reward penalty + detached (non-differentiable) actor loss",
     },
     "C1_cbf_diff_reward_only": {
@@ -108,7 +118,7 @@ ARMS: dict[str, dict[str, Any]] = {
     },
     "C2_cbf_projected": {
         "variants": ["ppo_cbf_projected"], "need": ["ppo_cbf_projected"],
-        "extra": ["--raw-actor-eval"],
+        "extra": ["--raw-actor-eval"], "actor_lambda_flag": "--lambda-mean",
         "what": "differentiable projection + reward penalty + actor loss",
     },
 }
@@ -165,9 +175,18 @@ def state_cost_args(barrier_form: str, lambda_s: float) -> list[str]:
     ]
 
 
+def actor_lambda_args(spec: dict[str, Any], actor_lambda: float) -> list[str]:
+    """The arm's actor-loss safety coefficient, if it has one."""
+
+    flag = spec.get("actor_lambda_flag")
+    return [] if flag is None else [str(flag), repr(float(actor_lambda))]
+
+
 def run_one(label: str, seed: int, out_base: Path, log_path: Path,
             timesteps: int, lateral_fix: bool,
-            barrier_form: str, lambda_s: float) -> bool:
+            barrier_form: str, lambda_s: float,
+            ego_desired_speed: float | None, actor_lambda: float,
+            extra_args: Sequence[str] = ()) -> bool:
     spec = ARMS[label]
     out_dir = out_base / label / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -177,11 +196,13 @@ def run_one(label: str, seed: int, out_base: Path, log_path: Path,
 
     for attempt in range(1, MAX_ATTEMPTS_PER_RUN + 1):
         argv = (
-            [PYTHON] + base_args(timesteps, lateral_fix)
+            [PYTHON] + base_args(timesteps, lateral_fix, ego_desired_speed)
             + ["--variants"] + spec["variants"]
             + ["--seeds", str(seed)]
             + list(spec["extra"])
+            + actor_lambda_args(spec, actor_lambda)
             + (state_cost_args(barrier_form, lambda_s) if spec.get("state_cost") else [])
+            + list(extra_args)
             + ["--output-dir", str(out_dir),
                "--tensorboard-run-label", f"{label}_s{seed}"]
         )
@@ -192,8 +213,15 @@ def run_one(label: str, seed: int, out_base: Path, log_path: Path,
         stderr_path = out_dir / f"attempt{attempt}.err"
         log(f"{label} seed {seed} attempt {attempt} starting", log_path)
         started = time.time()
+        # ``scripts.common.ppo_cbf_env`` imports ``saferl`` at module scope,
+        # before the training entry point's own src fallback runs, so a run from
+        # a shell without PYTHONPATH set dies on import. Same fix as
+        # scripts/tuning/ax_ppo_sweep.py and cbf_congested_tuning_sweep.py.
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         with stdout_path.open("wb") as out_f, stderr_path.open("wb") as err_f:
-            proc = subprocess.Popen(argv, cwd=str(PROJECT_ROOT), stdout=out_f, stderr=err_f)
+            proc = subprocess.Popen(argv, cwd=str(PROJECT_ROOT), stdout=out_f,
+                                    stderr=err_f, env=env)
             while True:
                 time.sleep(POLL_SECONDS)
                 if run_complete(out_dir, spec["need"]):
@@ -262,7 +290,28 @@ def main() -> int:
                         help="lambda_s for the B1 arm. 0.1619 is the calibrated value "
                              "for a 15%% share of base reward under the distance form; "
                              "0.0563 is what the earlier ellipse runs used, which "
-                             "measured at only ~1.8%%.")
+                             "measured at only ~1.8%%. The calibration was done at "
+                             "v_desired 16, so the share moves with --ego-desired-speed.")
+    parser.add_argument("--actor-lambda", type=float, default=0.10,
+                        help="Actor-loss safety coefficient for the two arms that "
+                             "carry one: --lambda-detached-actor on B2, --lambda-mean "
+                             "on C2. 0.10 is what the 1M safety matrix ran; the "
+                             "published evaluation tables report those two arms at 1.0 "
+                             "from the separate lambda studies.")
+    parser.add_argument("--ego-desired-speed", type=float, default=None,
+                        help="v_desired in m/s. Unset keeps the contract's 16.0. It is "
+                             "also the reward's cx normalizer and wx is not retuned "
+                             "with it, so changing it is not a pure speed change.")
+    parser.add_argument("--extra-arg", dest="extra_args", action="append", default=[],
+                        metavar="ARG",
+                        help="Verbatim argument appended to every run's command line, "
+                             "repeatable, for knobs this launcher does not name. Flag "
+                             "and value are separate occurrences, and anything starting "
+                             "with '-' needs the '=' form or argparse reads it as an "
+                             "option here: --extra-arg=--collision-penalty --extra-arg "
+                             "-25. Give each configuration its own --out-base: a run is "
+                             "resumed or skipped on its output path alone, which does "
+                             "not encode these.")
     parser.add_argument(
         "--out-base", type=Path,
         default=Path(os.environ.get("LOCALAPPDATA", "."))
@@ -290,9 +339,13 @@ def main() -> int:
     print(f"concurrency : {args.concurrency}")
     print(f"lateral fix : {args.lateral_fix}")
     print(f"state cost  : form={args.state_cost_barrier_form} lambda={args.state_cost_lambda}")
+    print(f"actor lambda: {args.actor_lambda}")
+    print(f"v_desired   : {16.0 if args.ego_desired_speed is None else args.ego_desired_speed}"
+          f"{'  (contract default)' if args.ego_desired_speed is None else ''}")
+    print(f"extra args  : {' '.join(args.extra_args) or '-'}")
     print(f"out         : {out_base}")
     for label in labels:
-        extra = list(ARMS[label]["extra"])
+        extra = list(ARMS[label]["extra"]) + actor_lambda_args(ARMS[label], args.actor_lambda)
         if ARMS[label].get("state_cost"):
             extra += state_cost_args(args.state_cost_barrier_form, args.state_cost_lambda)
         print(f"   {label:26s} {ARMS[label]['what']}")
@@ -314,14 +367,18 @@ def main() -> int:
     failures: list[str] = []
     try:
         log(f"STUDY START {len(jobs)} runs, {args.timesteps:,} steps, "
-            f"concurrency {args.concurrency}, lateral_fix={args.lateral_fix}", log_path)
+            f"concurrency {args.concurrency}, lateral_fix={args.lateral_fix}, "
+            f"v_desired={16.0 if args.ego_desired_speed is None else args.ego_desired_speed}, "
+            f"actor_lambda={args.actor_lambda}, "
+            f"extra=[{' '.join(args.extra_args)}]", log_path)
         started = time.time()
 
         def work(job: tuple[str, int]) -> None:
             label, seed = job
             if not run_one(label, seed, out_base, log_path, args.timesteps,
                            args.lateral_fix, args.state_cost_barrier_form,
-                           args.state_cost_lambda):
+                           args.state_cost_lambda, args.ego_desired_speed,
+                           args.actor_lambda, args.extra_args):
                 failures.append(f"{label}/seed_{seed}")
 
         if args.concurrency <= 1:
