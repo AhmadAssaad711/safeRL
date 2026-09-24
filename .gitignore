@@ -84,3 +84,6 @@ notes/
 **/*.canvas
 **/Pasted image*.png
 **/Screenshot *.png
+
+# pytest --basetemp scratch markers from an ad-hoc CBF check run
+.cbf-check-*/
