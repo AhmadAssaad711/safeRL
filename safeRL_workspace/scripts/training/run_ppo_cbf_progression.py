@@ -866,6 +866,15 @@ def _effective_training_settings(
             if bool(spec.get("safety_critic", False))
             else 0.0
         ),
+        **(
+            # Recorded only when it is not the default, so the signature hash
+            # -- and therefore every checkpoint's identity -- is unchanged for
+            # runs made before this option existed.
+            {"jacobian_alpha": float(getattr(args, "jacobian_alpha", 1.0))}
+            if bool(spec.get("projected_mean", False))
+            and float(getattr(args, "jacobian_alpha", 1.0)) != 1.0
+            else {}
+        ),
         "safety_critic_gamma": (
             float(getattr(args, "safety_critic_gamma", 0.99))
             if bool(spec.get("safety_critic", False))
@@ -1898,6 +1907,11 @@ def resolved_ppo_config(args: argparse.Namespace) -> dict[str, Any]:
         config["gae_lambda"] = float(args.gae_lambda)
     if getattr(args, "vf_coef", None) is not None:
         config["vf_coef"] = float(args.vf_coef)
+    if getattr(args, "max_grad_norm", None) is not None:
+        norm = float(args.max_grad_norm)
+        if not math.isfinite(norm) or norm <= 0.0:
+            raise ValueError("--max-grad-norm must be finite and positive")
+        config["max_grad_norm"] = norm
     if args.learning_rate is not None:
         rate = float(args.learning_rate)
         # Unlike ent_coef, where zero is meaningful, a non-positive learning rate
@@ -1966,6 +1980,15 @@ def build_model(
         "vf_coef": float(config["vf_coef"]),
         "max_grad_norm": float(config["max_grad_norm"]),
         "use_sde": False,
+        # None is SB3's default and leaves the epoch loop uncapped. Measured on
+        # this environment, approx_kl rises 1.7-2.5x and clip_fraction 1.8-2.2x
+        # over training, i.e. later updates move the policy further than early
+        # ones; target_kl is the direct control on that.
+        "target_kl": (
+            None
+            if getattr(args, "target_kl", None) is None
+            else float(args.target_kl)
+        ),
         "tensorboard_log": str(tensorboard_log),
         "verbose": 0,
         "seed": int(training_seed),
@@ -1973,6 +1996,9 @@ def build_model(
         "execution_mode": str(spec["execution_mode"]),
         "cbf_base_observation_dim": int(base_observation_dim),
         "cbf_max_constraints": 18,
+        "separate_grad_clip": bool(getattr(args, "separate_grad_clip", False)),
+        "value_loss_fn": str(getattr(args, "value_loss", "mse")),
+        "huber_delta": float(getattr(args, "huber_delta", 10.0)),
     }
     if bool(spec["projected_mean"]):
         projected_policy_kwargs = {
@@ -1984,6 +2010,7 @@ def build_model(
         return ProjectedCBFPPO(
             ProjectedCBFActorCriticPolicy,
             train_env,
+            jacobian_alpha=float(getattr(args, "jacobian_alpha", 1.0)),
             lambda_mean=(
                 float(args.lambda_mean)
                 if bool(spec.get("differentiable_actor_loss", False))
@@ -4099,6 +4126,56 @@ def parse_args() -> argparse.Namespace:
         help="Override the PPO value-loss coefficient from the selected --ppo-config.",
     )
     parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=None,
+        help=(
+            "Override the PPO gradient-norm clip from the selected --ppo-config. "
+            "The clip is applied once across policy and value parameters "
+            "together, and measured on this environment it binds on every "
+            "update, so this is not a rarely-active safety net."
+        ),
+    )
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=None,
+        help=(
+            "Stop the epoch loop early once approx_kl exceeds 1.5x this value. "
+            "Unset (the SB3 default) leaves it uncapped, which is what every run "
+            "here has used."
+        ),
+    )
+    parser.add_argument(
+        "--value-loss",
+        choices=("mse", "huber"),
+        default="mse",
+        help=(
+            "Critic regression loss. 'mse' is stock PPO, where a terminal penalty "
+            "of magnitude P contributes P^2 to the loss and P to the gradient. "
+            "'huber' saturates that gradient at --huber-delta, which is the "
+            "standard remedy for unnormalized returns with rare large entries."
+        ),
+    )
+    parser.add_argument(
+        "--huber-delta",
+        type=float,
+        default=10.0,
+        help="Transition point of the Huber value loss; inert unless --value-loss huber.",
+    )
+    parser.add_argument(
+        "--separate-grad-clip",
+        action="store_true",
+        help=(
+            "Clip the policy and value gradients to --max-grad-norm independently "
+            "instead of sharing one budget across all parameters. The two networks "
+            "are disjoint under net_arch={'pi':..., 'vf':...}, so the shared clip is "
+            "the only path by which a large value loss can scale the policy gradient "
+            "down. Off by default: on, the update is no longer stock PPO. The "
+            "train/grad_norm_* diagnostics are recorded either way."
+        ),
+    )
+    parser.add_argument(
         "--collision-penalty",
         type=float,
         default=None,
@@ -4277,6 +4354,20 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Nominal-only penalty coefficient for the squared difference "
             "between consecutive normalized executed actions."
+        ),
+    )
+    parser.add_argument(
+        "--jacobian-alpha",
+        type=float,
+        default=1.0,
+        help=(
+            "Interpolate the projection's backward pass between its true "
+            "Jacobian (1.0, the ordinary differentiable projection) and the "
+            "identity (0.0, gradient flows as though the filter were absent). "
+            "The forward pass, and therefore the executed action, is identical "
+            "at every setting -- only what the actor is told its action caused "
+            "changes. Projected-mean variants only. Default 1.0 takes a "
+            "separate code path and is bit-identical to prior runs."
         ),
     )
     parser.add_argument("--lambda-delta", type=float, default=0.05)
@@ -4578,6 +4669,22 @@ def parse_args() -> argparse.Namespace:
         help="First-level CBF gain in psi1 = h_dot + psi1_gain*h.",
     )
     parser.add_argument(
+        "--action-bounds",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("AX_MIN", "AX_MAX", "AY_MIN", "AY_MAX"),
+        help=(
+            "Physical acceleration box, applied to BOTH the CBF-QP and the "
+            "simulator because validate_matching_physical_action_bounds "
+            "requires them identical; a filter permitted to certify actions "
+            "the actuator cannot execute would be unsound. Widening this also "
+            "widens what the policy can command, since the normalized action "
+            "maps onto this box, so a policy trained at a narrower box is "
+            "out of distribution here. Default: the notebook's own bounds."
+        ),
+    )
+    parser.add_argument(
         "--max-neighbor-constraints",
         type=int,
         default=None,
@@ -4874,7 +4981,26 @@ def main() -> int:
         if int(args.max_neighbor_constraints) < 1:
             raise ValueError("--max-neighbor-constraints must be positive")
         namespace["CBF_MAX_NEIGHBOR_CONSTRAINTS"] = int(args.max_neighbor_constraints)
+    action_bounds = getattr(args, "action_bounds", None)
+    if action_bounds is not None:
+        ax_min, ax_max, ay_min, ay_max = (float(value) for value in action_bounds)
+        if ax_min >= ax_max or ay_min >= ay_max:
+            raise ValueError("--action-bounds needs min < max on both axes")
+        namespace["CBF_AX_BOUNDS"] = (ax_min, ax_max)
+        namespace["CBF_AY_BOUNDS"] = (ay_min, ay_max)
     env_config = env_config_from_args(args, namespace["ENV_CONFIG"])
+    if action_bounds is not None:
+        # validate_matching_physical_action_bounds requires the filter box and
+        # the simulator box to be identical, so both are set from one flag
+        # rather than left to agree by hand.
+        env_config.setdefault("bounds", {}).update(
+            {
+                "ax_min": ax_min,
+                "ax_max": ax_max,
+                "ay_min": ay_min,
+                "ay_max": ay_max,
+            }
+        )
     if active_traffic_model(env_config) == "mtm":
         _deep_set_defaults(
             env_config, copy.deepcopy(MTM_CONGESTED_UNCERTAIN_UPDATES)
@@ -5382,6 +5508,12 @@ def main() -> int:
             getattr(args, "tensorboard_run_label", None) or ""
         ),
         "ppo_config": resolved_ppo_config(args),
+        "separate_grad_clip": bool(getattr(args, "separate_grad_clip", False)),
+        "value_loss_fn": str(getattr(args, "value_loss", "mse")),
+        "huber_delta": float(getattr(args, "huber_delta", 10.0)),
+        "target_kl": (
+            None if getattr(args, "target_kl", None) is None else float(args.target_kl)
+        ),
         "collection_topology": training_topology(args),
         "traffic_model": active_traffic_model(env_config),
         "common_physical_action_bounds": {

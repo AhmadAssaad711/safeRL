@@ -1,4 +1,4 @@
-"""PPO variants with hard CBF execution and optional actor integration.
+﻿"""PPO variants with hard CBF execution and optional actor integration.
 
 Data semantics are intentionally explicit:
 
@@ -320,10 +320,20 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
         cbf_max_constraints: int = 18,
         cbf_feasibility_tol: float = 1e-6,
         use_safety_critic: bool = True,
+        jacobian_alpha: float = 1.0,
         **kwargs,
     ) -> None:
         if kwargs.get("use_sde", False):
             raise ValueError("ProjectedCBFActorCriticPolicy does not support gSDE")
+        # Dial between the projection's true Jacobian and the identity, used to
+        # isolate how much of this arm's behaviour comes from differentiating
+        # the filter as opposed to its forward pass. The forward value is
+        # unchanged at every setting; only the gradient interpolates. 1.0 is the
+        # ordinary differentiable projection and takes a separate code path so
+        # it stays bit-identical to runs made before this option existed.
+        self.jacobian_alpha = float(jacobian_alpha)
+        if not 0.0 <= self.jacobian_alpha <= 1.0:
+            raise ValueError("jacobian_alpha must lie in [0, 1]")
         extractor_class = kwargs.pop(
             "features_extractor_class", CBFBaseFeaturesExtractor
         )
@@ -434,9 +444,23 @@ class ProjectedCBFActorCriticPolicy(ActorCriticPolicy):
         # No mathematical projection exists when the no-slack set is empty.
         # Use the shared labelled fallback for behavior, but do not claim or
         # propagate an optimization-layer Jacobian through that fallback.
+        safe_action = projection.action
+        if self.jacobian_alpha != 1.0:
+            # Forward value is exactly projection.action; the backward pass
+            # becomes alpha * J + (1 - alpha) * I, where the identity path is
+            # taken with respect to the projection's own input mu_box. Both
+            # bracketed terms are numerically zero, so nothing about the
+            # executed action changes -- only what the actor is told its
+            # action was responsible for.
+            alpha = self.jacobian_alpha
+            safe_action = (
+                safe_action.detach()
+                + alpha * (safe_action - safe_action.detach())
+                + (1.0 - alpha) * (mu_box - mu_box.detach())
+            )
         mu_safe = th.where(
             projection.feasible.unsqueeze(1),
-            projection.action,
+            safe_action,
             projection.action.detach(),
         )
         distribution = self.action_dist.proba_distribution(mu_safe, self.log_std)
@@ -555,6 +579,9 @@ class LatentActionPPO(PPO):
         cbf_base_observation_dim: int = 42,
         cbf_max_constraints: int = 18,
         cbf_feasibility_tol: float = 1e-6,
+        separate_grad_clip: bool = False,
+        value_loss_fn: str = "mse",
+        huber_delta: float = 10.0,
         **kwargs,
     ) -> None:
         self.execution_mode = str(execution_mode).strip().lower()
@@ -565,7 +592,195 @@ class LatentActionPPO(PPO):
             max_constraints=int(cbf_max_constraints),
         )
         self.cbf_feasibility_tol = float(cbf_feasibility_tol)
+        self.separate_grad_clip = bool(separate_grad_clip)
+        self.value_loss_fn = str(value_loss_fn).strip().lower()
+        if self.value_loss_fn not in {"mse", "huber"}:
+            raise ValueError("value_loss_fn must be 'mse' or 'huber'")
+        self.huber_delta = float(huber_delta)
         super().__init__(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Gradient clipping and instrumentation
+    #
+    # Stock PPO applies one ``clip_grad_norm_`` across every parameter, so with
+    # ``net_arch={"pi": ..., "vf": ...}`` the two disjoint networks share a
+    # single budget: a large value loss inflates the total norm and the clip
+    # scales the policy gradient down with it. That coupling is the only path
+    # by which the critic can slow the actor here, and it is invisible in the
+    # stock logs, so the norms are recorded whether or not the split is on.
+    # ------------------------------------------------------------------
+
+    def _value_loss(self, returns: th.Tensor, values_pred: th.Tensor) -> th.Tensor:
+        """Critic regression loss.
+
+        ``mse`` is stock PPO. ``huber`` is the standard remedy when the target
+        distribution has rare large-magnitude entries: squared error makes a
+        terminal penalty of magnitude P contribute P^2 to the loss and P to the
+        gradient, so the critic's gradient grows without bound in P, while the
+        Huber gradient saturates at ``huber_delta``. Engstrom et al. (2020) and
+        the DreamerV3-tricks-for-PPO study both identify unnormalized,
+        wide-magnitude returns as the regime where this matters.
+        """
+
+        if self.value_loss_fn == "huber":
+            return F.huber_loss(values_pred, returns, delta=self.huber_delta)
+        return F.mse_loss(returns, values_pred)
+
+    def _gradient_parameter_groups(self) -> tuple[list, list]:
+        """Split parameters with gradients into policy and value groups."""
+
+        policy_params, value_params = [], []
+        for name, param in self.policy.named_parameters():
+            if param.grad is None:
+                continue
+            if "value_net" in name:
+                value_params.append(param)
+            else:
+                policy_params.append(param)
+        return policy_params, value_params
+
+    @staticmethod
+    def _group_grad_norm(params: list) -> float:
+        """L2 norm over a parameter group, matching ``clip_grad_norm_``."""
+
+        if not params:
+            return 0.0
+        stacked = th.stack([th.norm(p.grad.detach(), 2) for p in params])
+        return float(th.norm(stacked, 2).item())
+
+    def _clip_and_log_gradients(self) -> None:
+        """Clip gradients, recording the pre-clip norms of both groups."""
+
+        policy_params, value_params = self._gradient_parameter_groups()
+        pi_norm = self._group_grad_norm(policy_params)
+        vf_norm = self._group_grad_norm(value_params)
+        total_norm = float(np.sqrt(pi_norm**2 + vf_norm**2))
+
+        self.logger.record_mean("train/grad_norm_pi", pi_norm)
+        self.logger.record_mean("train/grad_norm_vf", vf_norm)
+        self.logger.record_mean("train/grad_norm_total", total_norm)
+        # Fraction of updates where the clip actually binds. If this is ~0 the
+        # shared budget is not the mechanism, whatever the value loss reads.
+        self.logger.record_mean(
+            "train/grad_clip_active", 1.0 if total_norm > self.max_grad_norm else 0.0
+        )
+        # What the policy gradient is scaled by after the shared clip. 1.0 means
+        # untouched; the split makes this the policy group's own clip instead.
+        shared_scale = min(1.0, self.max_grad_norm / (total_norm + 1e-8))
+        split_scale = min(1.0, self.max_grad_norm / (pi_norm + 1e-8))
+        self.logger.record_mean(
+            "train/grad_scale_pi", split_scale if self.separate_grad_clip else shared_scale
+        )
+
+        if self.separate_grad_clip:
+            if policy_params:
+                th.nn.utils.clip_grad_norm_(policy_params, self.max_grad_norm)
+            if value_params:
+                th.nn.utils.clip_grad_norm_(value_params, self.max_grad_norm)
+        else:
+            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+
+    def train(self) -> None:
+        """Stock PPO update, with the clip routed through the instrumented path.
+
+        Copied from ``stable_baselines3.ppo.PPO.train`` (2.7.1); the only change
+        is that the single ``clip_grad_norm_`` becomes
+        :meth:`_clip_and_log_gradients`. Kept verbatim otherwise so the default
+        configuration remains bit-for-bit the stock update.
+        """
+
+        self.policy.set_training_mode(True)
+        self._update_learning_rate(self.policy.optimizer)
+        clip_range = self.clip_range(self._current_progress_remaining)
+        if self.clip_range_vf is not None:
+            clip_range_vf = self.clip_range_vf(self._current_progress_remaining)
+
+        entropy_losses = []
+        pg_losses, value_losses = [], []
+        clip_fractions = []
+
+        continue_training = True
+        for epoch in range(self.n_epochs):
+            approx_kl_divs = []
+            for rollout_data in self.rollout_buffer.get(self.batch_size):
+                actions = rollout_data.actions
+                if isinstance(self.action_space, spaces.Discrete):
+                    actions = rollout_data.actions.long().flatten()
+
+                values, log_prob, entropy = self.policy.evaluate_actions(
+                    rollout_data.observations, actions
+                )
+                values = values.flatten()
+                advantages = rollout_data.advantages
+                if self.normalize_advantage and len(advantages) > 1:
+                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+                ratio = th.exp(log_prob - rollout_data.old_log_prob)
+
+                policy_loss_1 = advantages * ratio
+                policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
+
+                pg_losses.append(policy_loss.item())
+                clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                clip_fractions.append(clip_fraction)
+
+                if self.clip_range_vf is None:
+                    values_pred = values
+                else:
+                    values_pred = rollout_data.old_values + th.clamp(
+                        values - rollout_data.old_values, -clip_range_vf, clip_range_vf
+                    )
+                value_loss = self._value_loss(rollout_data.returns, values_pred)
+                value_losses.append(value_loss.item())
+
+                if entropy is None:
+                    entropy_loss = -th.mean(-log_prob)
+                else:
+                    entropy_loss = -th.mean(entropy)
+
+                entropy_losses.append(entropy_loss.item())
+
+                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+
+                with th.no_grad():
+                    log_ratio = log_prob - rollout_data.old_log_prob
+                    approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                    approx_kl_divs.append(approx_kl_div)
+
+                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                    continue_training = False
+                    if self.verbose >= 1:
+                        print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                    break
+
+                self.policy.optimizer.zero_grad()
+                loss.backward()
+                self._clip_and_log_gradients()
+                self.policy.optimizer.step()
+
+            self._n_updates += 1
+            if not continue_training:
+                break
+
+        explained_var = explained_variance(
+            self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten()
+        )
+
+        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
+        self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
+        self.logger.record("train/value_loss", np.mean(value_losses))
+        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
+        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
+        self.logger.record("train/loss", loss.item())
+        self.logger.record("train/explained_variance", explained_var)
+        if hasattr(self.policy, "log_std"):
+            self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+
+        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        self.logger.record("train/clip_range", clip_range)
+        if self.clip_range_vf is not None:
+            self.logger.record("train/clip_range_vf", clip_range_vf)
 
     def _execution_actions(
         self, latent_actions: np.ndarray, observations: np.ndarray
@@ -1054,7 +1269,7 @@ class DetachedCBFActorPPO(LatentActionPPO):
                         -clip_range_vf,
                         clip_range_vf,
                     )
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                value_loss = self._value_loss(rollout_data.returns, values_pred)
                 value_losses.append(float(value_loss.detach().cpu().item()))
 
                 if evaluation.entropy is None:
@@ -1131,9 +1346,7 @@ class DetachedCBFActorPPO(LatentActionPPO):
 
                 self.policy.optimizer.zero_grad()
                 loss.backward()
-                th.nn.utils.clip_grad_norm_(
-                    self.policy.parameters(), self.max_grad_norm
-                )
+                self._clip_and_log_gradients()
                 self.policy.optimizer.step()
 
             self._n_updates += 1
@@ -1212,8 +1425,12 @@ class ProjectedCBFPPO(LatentActionPPO):
         lambda_critic: float = 0.0,
         safety_gamma: float = 0.99,
         safety_cost_clip: float = 1.0,
+        jacobian_alpha: float = 1.0,
         **kwargs,
     ) -> None:
+        self.jacobian_alpha = float(jacobian_alpha)
+        if not 0.0 <= self.jacobian_alpha <= 1.0:
+            raise ValueError("jacobian_alpha must lie in [0, 1]")
         self.lambda_mean = float(lambda_mean)
         self.lambda_sample = float(lambda_sample)
         self.lambda_critic = float(lambda_critic)
@@ -1249,6 +1466,10 @@ class ProjectedCBFPPO(LatentActionPPO):
                 "A nonzero lambda_critic requires use_safety_critic=True"
             )
         policy_kwargs["use_safety_critic"] = self.use_safety_critic
+        # Only pass it down when it is not the default, so historical
+        # checkpoints -- which have no such policy kwarg saved -- still load.
+        if self.jacobian_alpha != 1.0:
+            policy_kwargs["jacobian_alpha"] = self.jacobian_alpha
         kwargs["policy_kwargs"] = policy_kwargs
         buffer_kwargs = dict(kwargs.pop("rollout_buffer_kwargs", {}) or {})
         if self.use_safety_critic:
@@ -1359,7 +1580,7 @@ class ProjectedCBFPPO(LatentActionPPO):
                         -clip_range_vf,
                         clip_range_vf,
                     )
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                value_loss = self._value_loss(rollout_data.returns, values_pred)
                 value_losses.append(float(value_loss.detach().cpu().item()))
 
                 safety_critic_loss = th.zeros((), device=self.device)
@@ -1486,10 +1707,13 @@ class ProjectedCBFPPO(LatentActionPPO):
                     + self.lambda_sample * sample_loss
                 )
                 critic_auxiliary_loss = self.lambda_critic * safety_critic_loss
-                if (
-                    (self.lambda_mean != 0.0 or self.lambda_sample != 0.0)
-                    and not gradient_rows
-                ):
+                # Logged for every run, not only when an auxiliary actor loss is
+                # active. The lambda_mean=0 arms are exactly the ones that isolate
+                # the projection Jacobian, and skipping them left those runs with
+                # no g_ppo trace at all -- the gradient growth over training is a
+                # property of PPO, not of the auxiliary term. g_cbf_norm is simply
+                # 0 when the auxiliary loss is off.
+                if not gradient_rows:
                     actor_primary_loss = (
                         policy_loss + self.ent_coef * entropy_loss
                     )
@@ -1530,9 +1754,7 @@ class ProjectedCBFPPO(LatentActionPPO):
 
                 self.policy.optimizer.zero_grad()
                 loss.backward()
-                th.nn.utils.clip_grad_norm_(
-                    self.policy.parameters(), self.max_grad_norm
-                )
+                self._clip_and_log_gradients()
                 self.policy.optimizer.step()
 
             self._n_updates += 1
