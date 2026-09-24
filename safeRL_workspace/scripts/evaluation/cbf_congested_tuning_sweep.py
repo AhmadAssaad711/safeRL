@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -91,8 +92,37 @@ TRACE_FIELDS = (
 TRACE_FLAGS = ("cbf_qp_success", "cbf_fallback_used", "cbf_intervened")
 
 
+DT = 0.05  # policy/CBF period, 20 Hz
+
+
 def gains_from_damping(omega_n: float, zeta: float) -> tuple[float, float]:
     return float(omega_n) ** 2, 2.0 * float(zeta) * float(omega_n)
+
+
+def gains_from_discrete_poles(
+    z_slow: float, z_fast: float, dt: float = DT
+) -> tuple[float, float]:
+    """k0, k1 from discrete pole locations at the filter's own 20 Hz rate.
+
+    The filter is applied every dt, so the quantity with direct meaning is how
+    much of the barrier survives one control step: z = exp(s*dt). Placing z
+    and mapping back via s = ln(z)/dt keeps the aggressive region interpretable,
+    where the continuous (omega_n, zeta) description stops describing anything
+    -- measured earlier as identification holding to ~10% for omega_n*dt <= 0.14
+    and failing by ~70% at 0.20, i.e. below z ~ 0.82.
+
+    Both poles are real and in (0, 1): z -> 1 is a barrier that relaxes over
+    many steps, z -> 0 is dead-beat, driving h toward the boundary within a
+    single step.
+    """
+
+    if not (0.0 < z_slow < 1.0 and 0.0 < z_fast < 1.0):
+        raise ValueError(
+            f"discrete poles must lie in (0, 1); got {z_slow}, {z_fast}"
+        )
+    s_slow = math.log(float(z_slow)) / float(dt)
+    s_fast = math.log(float(z_fast)) / float(dt)
+    return float(s_slow * s_fast), float(-(s_slow + s_fast))
 
 
 def predicted_poles(omega_n: float, zeta: float) -> tuple[complex, complex]:
@@ -130,6 +160,8 @@ def run_kpi_stage(
     workers: int,
     seed_start: int,
     log_path: Path,
+    max_neighbor_constraints: int | None = None,
+    action_bounds: tuple[float, float, float, float] | None = None,
 ) -> pd.DataFrame | None:
     point_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -152,7 +184,11 @@ def run_kpi_stage(
         # grid point is measured against a different filter than k0/k1 alone.
         "--psi1-gain", str(float(policy["cbf"]["CBF_PSI1_GAIN"])),
         "--max-neighbor-constraints",
-        str(int(policy["cbf"]["CBF_MAX_NEIGHBOR_CONSTRAINTS"])),
+        str(
+            int(policy["cbf"]["CBF_MAX_NEIGHBOR_CONSTRAINTS"])
+            if max_neighbor_constraints is None
+            else int(max_neighbor_constraints)
+        ),
         "--post-train-eval-episodes", str(episodes),
         "--post-train-eval-workers", str(workers),
         "--post-train-eval-seed-start", str(seed_start),
@@ -160,6 +196,8 @@ def run_kpi_stage(
         "--skip-counterfactual",
         "--output-dir", str(point_dir),
     ]
+    if action_bounds is not None:
+        cmd.extend(["--action-bounds", *(str(float(v)) for v in action_bounds)])
     env = dict(os.environ)
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     with open(log_path, "w", encoding="utf-8") as handle:
@@ -321,6 +359,54 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Deliberately-too-fast omega_n values, run only at zeta=1.0, to "
              "show the discretisation breakdown predicted by omega_n*dt.",
     )
+    parser.add_argument(
+        "--z-slow", type=float, nargs="*", default=None,
+        help=(
+            "Discrete-time mode: slow (dominant) pole locations in (0,1) at the "
+            "20 Hz filter rate, crossed with --z-fast-ratio. Replaces the "
+            "(omega_n, zeta) grid when given. z is the fraction of the barrier "
+            "surviving one control step."
+        ),
+    )
+    parser.add_argument(
+        "--z-fast-ratio", type=float, nargs="*", default=[1.0],
+        help=(
+            "z_fast = ratio * z_slow; 1.0 gives a double pole. Values below 1 "
+            "split the poles, the discrete analogue of overdamping."
+        ),
+    )
+    parser.add_argument(
+        "--ax-min", type=float, nargs="*", default=None,
+        help=(
+            "Braking bounds to sweep (negative). Crossed with --ay-abs. "
+            "ax_max stays at the checkpoint's value; braking is widened "
+            "asymmetrically because a car decelerates far harder than it "
+            "accelerates."
+        ),
+    )
+    parser.add_argument(
+        "--ay-abs", type=float, nargs="*", default=None,
+        help="Symmetric lateral bounds to sweep, as +/- this value.",
+    )
+    parser.add_argument(
+        "--friction-budget", type=float, default=8.0,
+        help=(
+            "Reject any (ax_min, ay) corner whose magnitude exceeds this, "
+            "since a box permits the corner while the friction circle does "
+            "not; default 8.0 m/s^2 ~ 0.8g on dry asphalt."
+        ),
+    )
+    parser.add_argument(
+        "--max-neighbor-constraints", type=int, nargs="*", default=None,
+        help=(
+            "Neighbour-constraint caps to sweep, crossed with the gain grid. "
+            "Omit to use the checkpoint's own value. The constraint system is "
+            "n neighbours + 2 road boundaries + 4 action-box rows against a "
+            "padded capacity of 18, so n must not exceed 12. The observation "
+            "is padded to that capacity either way, so the checkpoint stays "
+            "compatible; only how many neighbours the QP can see changes."
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--eval-workers", type=int, default=10)
     parser.add_argument("--trace-episodes", type=int, default=8)
@@ -360,10 +446,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         flush=True,
     )
 
-    grid: list[tuple[float, float, bool]] = [
-        (omega, zeta, False) for omega in args.omega_n for zeta in args.zeta
+    caps: list[int | None] = list(args.max_neighbor_constraints or [None])
+    for cap in caps:
+        if cap is not None and not 1 <= int(cap) <= 12:
+            raise ValueError(
+                f"--max-neighbor-constraints {cap} is outside 1..12; the "
+                "constraint system is n + 6 rows against a padded capacity "
+                "of 18, so anything above 12 raises at runtime."
+            )
+    base_ax = tuple(float(v) for v in policy["cbf"]["CBF_AX_BOUNDS"])
+    base_ay = tuple(float(v) for v in policy["cbf"]["CBF_AY_BOUNDS"])
+    bound_sets: list[tuple[float, float, float, float] | None] = [None]
+    if args.ax_min is not None or args.ay_abs is not None:
+        ax_mins = [float(v) for v in (args.ax_min or [base_ax[0]])]
+        ay_abs = [float(v) for v in (args.ay_abs or [abs(base_ay[1])])]
+        bound_sets = []
+        for ax_lo in ax_mins:
+            for ay in ay_abs:
+                corner = math.hypot(ax_lo, ay)
+                if corner > float(args.friction_budget):
+                    print(
+                        f"[cbf-congested] skip ax_min={ax_lo:g} ay=+/-{ay:g}: "
+                        f"corner {corner:.2f} exceeds friction budget "
+                        f"{args.friction_budget:g} m/s^2",
+                        flush=True,
+                    )
+                    continue
+                bound_sets.append((ax_lo, base_ax[1], -ay, ay))
+        if not bound_sets:
+            raise ValueError("every requested action box exceeded --friction-budget")
+
+    grid: list[tuple[float, float, int | None, Any, bool]] = [
+        (omega, zeta, cap, bounds, False)
+        for bounds in bound_sets
+        for cap in caps
+        for omega in args.omega_n
+        for zeta in args.zeta
     ]
-    grid.extend((omega, 1.0, True) for omega in (args.probe_omega_n or ()))
+    grid.extend(
+        (omega, 1.0, caps[0], bound_sets[0], True)
+        for omega in (args.probe_omega_n or ())
+    )
 
     namespace = None
     model = None
@@ -371,24 +494,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         namespace = build_namespace(PROJECT_ROOT, policy["cbf"])
         model = load_model(policy["variant"], policy["model_path"], "cpu")
 
-    existing: set[tuple[float, float]] = set()
+    existing: set[tuple[float, float, float]] = set()
     if args.skip_existing and summary_path.is_file():
         done = pd.read_csv(summary_path)
+        done_caps = (
+            done["max_neighbor_constraints"]
+            if "max_neighbor_constraints" in done.columns
+            else pd.Series([-1] * len(done))
+        )
         existing = {
-            (round(float(a), 6), round(float(b), 6))
-            for a, b in zip(done["omega_n"], done["zeta"])
+            (round(float(a), 6), round(float(b), 6), float(c if pd.notna(c) else -1))
+            for a, b, c in zip(done["omega_n"], done["zeta"], done_caps)
         }
 
-    for point_index, (omega_n, zeta, is_probe) in enumerate(grid):
-        if (round(omega_n, 6), round(zeta, 6)) in existing:
-            print(f"[cbf-congested] skip existing wn={omega_n} zeta={zeta}", flush=True)
+    for point_index, (omega_n, zeta, cap, bounds, is_probe) in enumerate(grid):
+        cap_key = float(cap) if cap is not None else -1.0
+        if bounds is None and (round(omega_n, 6), round(zeta, 6), cap_key) in existing:
+            print(
+                f"[cbf-congested] skip existing wn={omega_n} zeta={zeta} cap={cap}",
+                flush=True,
+            )
             continue
         k0, k1 = gains_from_damping(omega_n, zeta)
         tag = f"wn{omega_n:g}_z{zeta:g}".replace(".", "p")
+        if cap is not None:
+            tag += f"_n{int(cap)}"
+        if bounds is not None:
+            tag += f"_ax{bounds[0]:g}_ay{bounds[3]:g}".replace(".", "p").replace("-", "m")
         started = time.time()
+        effective_cap = (
+            int(cap)
+            if cap is not None
+            else int(policy["cbf"]["CBF_MAX_NEIGHBOR_CONSTRAINTS"])
+        )
         print(
             f"[cbf-congested] {point_index + 1}/{len(grid)} wn={omega_n:g} "
-            f"zeta={zeta:g} -> k0={k0:.4f} k1={k1:.4f}"
+            f"zeta={zeta:g} n={effective_cap} -> k0={k0:.4f} k1={k1:.4f}"
             + (" (probe)" if is_probe else ""),
             flush=True,
         )
@@ -404,10 +545,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             workers=int(args.eval_workers),
             seed_start=int(args.episode_seed_start),
             log_path=log_dir / f"{tag}_kpi.log",
+            max_neighbor_constraints=cap,
+            action_bounds=bounds,
+        )
+        eff_bounds = bounds if bounds is not None else (
+            base_ax[0], base_ax[1], base_ay[0], base_ay[1]
         )
         record: dict[str, Any] = {
             "omega_n": float(omega_n),
             "zeta": float(zeta),
+            "max_neighbor_constraints": effective_cap,
+            "ax_min": float(eff_bounds[0]),
+            "ax_max": float(eff_bounds[1]),
+            "ay_abs": float(eff_bounds[3]),
+            "corner_accel": float(math.hypot(eff_bounds[0], eff_bounds[3])),
             "k0": k0,
             "k1": k1,
             "is_probe": bool(is_probe),
@@ -423,6 +574,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.skip_traces:
             namespace["CBF_K0"] = float(k0)
             namespace["CBF_K1"] = float(k1)
+            # Must match the KPI subprocess, or the traces describe a
+            # different filter than the numbers they are paired with.
+            namespace["CBF_MAX_NEIGHBOR_CONSTRAINTS"] = effective_cap
+            namespace["CBF_AX_BOUNDS"] = (eff_bounds[0], eff_bounds[1])
+            namespace["CBF_AY_BOUNDS"] = (eff_bounds[2], eff_bounds[3])
+            # The simulator box has to move with the filter box, or the
+            # wrapper's construction-time cross-check rejects the pair.
+            policy["env_config"].setdefault("bounds", {}).update(
+                {
+                    "ax_min": eff_bounds[0],
+                    "ax_max": eff_bounds[1],
+                    "ay_min": eff_bounds[2],
+                    "ay_max": eff_bounds[3],
+                }
+            )
             trace = run_trace_stage(
                 namespace=namespace,
                 policy=policy,
@@ -432,6 +598,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_steps=int(args.trace_max_steps),
             )
             if not trace.empty:
+                trace.insert(0, "max_neighbor_constraints", effective_cap)
                 trace.insert(0, "zeta", float(zeta))
                 trace.insert(0, "omega_n", float(omega_n))
                 trace.to_csv(trace_dir / f"{tag}.csv", index=False)
