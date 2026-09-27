@@ -102,9 +102,32 @@ def build_search_space() -> list[dict[str, Any]]:
     ]
 
 
+def nearest_divisor(target: int, total: int) -> int:
+    """The divisor of ``total`` closest to ``target``, ties going to the larger.
+
+    ``n_steps // n_minibatches`` is the per-env minibatch size, but training
+    requires the batch to divide the *global* rollout ``N_ENVS * n_steps``.
+    Nineteen of the twenty (n_steps, n_minibatches) cells already satisfy that;
+    the twentieth, ``n_steps=500, n_minibatches=8``, truncates 62.5 to 62, which
+    does not divide 10,000 -- and every trial that drew it died before training
+    with ``PPO batch_size must divide the global rollout size``.
+
+    Snapping is deliberately the narrowest possible repair: it is a no-op on all
+    nineteen working cells, so a resumed search keeps the exact meaning of every
+    observation already in the GP. Recomputing the batch from the global rollout
+    instead would be cleaner arithmetic but would redefine ``n_minibatches`` for
+    every point, making old and new trials incomparable.
+    """
+
+    divisors = [d for d in range(1, total + 1) if total % d == 0]
+    return min(divisors, key=lambda d: (abs(d - target), -d))
+
+
 def resolved_cli_args(params: dict[str, Any]) -> list[str]:
     n_steps = int(params["n_steps"])
-    batch_size = max(n_steps // int(params["n_minibatches"]), 1)
+    batch_size = nearest_divisor(
+        max(n_steps // int(params["n_minibatches"]), 1), N_ENVS * n_steps
+    )
     args = [
         "--learning-rate", repr(float(params["learning_rate"])),
         "--n-steps", str(n_steps),
@@ -276,6 +299,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)
     p.add_argument("--state-file", type=Path, default=None)
+    p.add_argument("--resume-from", type=Path, default=None,
+                   help="An ax_state.json to continue. The experiment, its "
+                        "observations and the generation strategy are restored, "
+                        "and --n-sobol/--n-bo then count only the NEW trials "
+                        "this process issues. Without it a fresh experiment is "
+                        "created and prior observations are lost.")
     p.add_argument("--n-sobol", type=int, default=30)
     p.add_argument("--n-bo", type=int, default=70)
     p.add_argument("--timesteps", type=int, default=1_000_000)
@@ -294,16 +323,25 @@ def main() -> int:
     args.out_root.mkdir(parents=True, exist_ok=True)
     state_file = args.state_file or (args.out_root / "ax_state.json")
 
-    client = AxClient(random_seed=0)
-    client.create_experiment(
-        name="c2_full_fidelity",
-        parameters=build_search_space(),
-        objectives={"raw_actor_collisions": ObjectiveProperties(minimize=True)},
-        outcome_constraints=[f"cbf_on_collisions <= {CBF_ON_CONSTRAINT}"],
-    )
+    if args.resume_from is not None:
+        client = AxClient.load_from_json_file(str(args.resume_from))
+        completed = sum(
+            1 for t in client.experiment.trials.values() if t.status.is_completed
+        )
+        print(f"[c2-sweep] resumed {args.resume_from} with "
+              f"{len(client.experiment.trials)} trials, {completed} completed",
+              flush=True)
+    else:
+        client = AxClient(random_seed=0)
+        client.create_experiment(
+            name="c2_full_fidelity",
+            parameters=build_search_space(),
+            objectives={"raw_actor_collisions": ObjectiveProperties(minimize=True)},
+            outcome_constraints=[f"cbf_on_collisions <= {CBF_ON_CONSTRAINT}"],
+        )
 
     n_trials = args.n_sobol + args.n_bo
-    print(f"[c2-sweep] {n_trials} trials at {args.timesteps:,} steps, "
+    print(f"[c2-sweep] {n_trials} new trials at {args.timesteps:,} steps, "
           f"objective=raw-actor collisions/km (incumbent {BASELINE_RAW_ACTOR_COLLISIONS}), "
           f"constraint cbf_on <= {CBF_ON_CONSTRAINT}", flush=True)
 
