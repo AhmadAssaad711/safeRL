@@ -547,6 +547,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Skip the unscripted 40-vehicle condition (figure 1).",
     )
     parser.add_argument(
+        "--no-scenarios", action="store_true",
+        help="Skip every scripted scenario (figure 2 and its rollouts), leaving "
+             "only the congested condition. Each scenario costs another "
+             "len(seeds) x len(policies) rollouts, so this is what makes a "
+             "high seed count affordable.",
+    )
+    parser.add_argument(
         "--steps", type=int, default=200,
         help="Policy steps per rollout; 200 = 10 s at 20 Hz. Default %(default)s.",
     )
@@ -603,7 +610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     project_root = find_repo_root()
     scenarios_by_name = {s.name: s for s in make_scenarios(10.2)}
-    selected_scenarios = args.scenario or list(SIX_SCENES)
+    selected_scenarios = [] if args.no_scenarios else (args.scenario or list(SIX_SCENES))
     unknown = [n for n in selected_scenarios if n not in scenarios_by_name]
     if unknown:
         raise SystemExit(
@@ -736,51 +743,58 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     n_roll = len(seeds) * max(len(g) for g in policies.values())
 
-    # ---- Figure 1: congested only -------------------------------------
+    # ---- Figure 1: congested only, one panel per file --------------------
+    # The mean curve and the survival curve are read separately -- each is a
+    # figure in its own right -- so they are written as separate images rather
+    # than as a two-panel strip.
     if not args.no_congested:
-        fig = plt.figure(figsize=(14.0, 5.6))
-        gs = fig.add_gridspec(1, 2, wspace=0.18)
-        ax_mean = fig.add_subplot(gs[0, 0])
-        ax_surv = fig.add_subplot(gs[0, 1])
-        # The survival panel beside it reports the thinning sample directly,
-        # so the mean curve does not also have to encode it by fading.
-        draw_condition(
-            ax_mean, results[CONGESTED], policy_order,
-            horizon=horizon, policy_frequency_hz=policy_frequency_hz,
-            censor=args.censor, band=args.band, fade_censored=False,
-        )
-        ax_mean.set_title(
+        def congested_figure(draw_fn, subtitle: str, filename: str,
+                             ylim: tuple[float, float] | None = None) -> None:
+            fig = plt.figure(figsize=(7.6, 5.6))
+            ax = fig.add_subplot(1, 1, 1)
+            draw_fn(ax)
+            ax.set_title(subtitle, fontsize=10.5, fontweight="semibold")
+            if ylim is not None:
+                ax.set_ylim(*ylim)
+            handles, labels = ax.get_legend_handles_labels()
+            fig.legend(
+                handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.905),
+                frameon=False, fontsize=9.5, ncols=min(len(policy_order), 3),
+            )
+            fig.suptitle(
+                "HOCBF safety margin -- congested highway",
+                fontsize=15.0, fontweight="bold", y=0.985,
+            )
+            fig.subplots_adjust(top=0.790, bottom=0.105, left=0.105, right=0.975)
+            path = out_dir / filename
+            fig.savefig(path, dpi=200, facecolor="white")
+            plt.close(fig)
+            print(f"wrote {path}")
+
+        # The survival figure reports the thinning sample directly, so the mean
+        # curve does not also have to encode it by fading.
+        congested_figure(
+            lambda ax: draw_condition(
+                ax, results[CONGESTED], policy_order,
+                horizon=horizon, policy_frequency_hz=policy_frequency_hz,
+                censor=args.censor, band=args.band, fade_censored=False,
+            ),
             f"Seed average ({n_roll} rollouts per policy)",
-            fontsize=10.5, fontweight="semibold",
+            "hocbf_margin_congested_mean.png",
+            ylim=mean_curve_ylim(
+                results[CONGESTED], policy_order,
+                horizon=horizon, censor=args.censor, band=args.band,
+            ),
         )
-        draw_survival(
-            ax_surv, results[CONGESTED], policy_order,
-            horizon=horizon, policy_frequency_hz=policy_frequency_hz,
-            smooth_s=float(args.survival_smooth_s),
+        congested_figure(
+            lambda ax: draw_survival(
+                ax, results[CONGESTED], policy_order,
+                horizon=horizon, policy_frequency_hz=policy_frequency_hz,
+                smooth_s=float(args.survival_smooth_s),
+            ),
+            "Collision-free rollouts",
+            "hocbf_margin_congested_survival.png",
         )
-        ax_surv.set_title(
-            "Collision-free rollouts", fontsize=10.5, fontweight="semibold",
-        )
-        mean_limits = mean_curve_ylim(
-            results[CONGESTED], policy_order,
-            horizon=horizon, censor=args.censor, band=args.band,
-        )
-        if mean_limits is not None:
-            ax_mean.set_ylim(*mean_limits)
-        handles, labels = ax_mean.get_legend_handles_labels()
-        fig.legend(
-            handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.905),
-            frameon=False, fontsize=9.5, ncols=len(policy_order),
-        )
-        fig.suptitle(
-            "HOCBF safety margin -- congested highway",
-            fontsize=15.0, fontweight="bold", y=0.985,
-        )
-        fig.subplots_adjust(top=0.805, bottom=0.105, left=0.058, right=0.985)
-        path = out_dir / "hocbf_margin_congested_mean.png"
-        fig.savefig(path, dpi=200, facecolor="white")
-        plt.close(fig)
-        print(f"wrote {path}")
 
     # ---- Figure 2: scenario grid ---------------------------------------
     if selected_scenarios:

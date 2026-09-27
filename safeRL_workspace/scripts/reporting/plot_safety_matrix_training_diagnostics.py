@@ -14,6 +14,13 @@ TensorBoard scalars for the training-signal and stability sections exist for
 every arm; the CBF-field tags only exist where the mechanism they describe
 is actually present, so those figures silently skip arms with no matching
 tag rather than plotting an empty/zero line.
+
+``--arms`` restricts the comparison to a subset (e.g. the A1/B1/B2 default of
+``build_safety_matrix_results_tables.py``) and ``--smoothing`` applies the same
+per-seed EMA the lambda1p0 figures use. Both default to the original behaviour
+-- all five arms, raw scalars -- so re-running with no flags plots the same
+curves as the figures already in ``artifacts/reports/safety_matrix_1M/figures``;
+only the titles differ, since they now name the arms and the smoothing.
 """
 
 from __future__ import annotations
@@ -38,6 +45,13 @@ from scripts.reporting.build_safety_matrix_results_tables import (
     TASK_KPIS,
     aggregate_across_seeds,
     collect,
+)
+
+# Imported rather than re-implemented so a smoothed figure from this script is
+# smoothed exactly like the lambda1p0 figures it will be compared against.
+from scripts.reporting.plot_lambda1p0_training_diagnostics import (
+    SMOOTHING_WEIGHT,
+    ema_smooth,
 )
 
 ARM_COLORS = {
@@ -77,9 +91,19 @@ def load_curves(event_path: Path, tags: Sequence[str]) -> dict[str, pd.DataFrame
 
 
 def load_all(
-    study_dir: Path, arms: Sequence[str], seeds: Sequence[int], tags: Sequence[str]
+    study_dir: Path,
+    arms: Sequence[str],
+    seeds: Sequence[int],
+    tags: Sequence[str],
+    *,
+    smoothing: float = 0.0,
 ) -> dict[str, dict[str, dict[int, pd.DataFrame]]]:
-    """tag -> arm -> seed -> DataFrame(step, value)."""
+    """tag -> arm -> seed -> DataFrame(step, value).
+
+    Each seed's curve is EMA-smoothed before it is returned when ``smoothing``
+    is positive, so the per-seed mean is taken over smoothed curves rather than
+    smoothing the mean. ``smoothing = 0`` leaves the raw scalars untouched.
+    """
 
     result: dict[str, dict[str, dict[int, pd.DataFrame]]] = {tag: {} for tag in tags}
     for arm in arms:
@@ -92,6 +116,9 @@ def load_all(
                 continue
             curves = load_curves(event_path, tags)
             for tag, curve in curves.items():
+                if smoothing > 0.0 and not curve.empty:
+                    curve = curve.copy()
+                    curve["value"] = ema_smooth(curve["value"].to_numpy(), smoothing)
                 result[tag][arm][seed] = curve
     return result
 
@@ -132,8 +159,7 @@ def plot_tag_grid(
             if result is None:
                 continue
             grid, mean = result
-            code = ALL_ARMS[arm][0]
-            ax.plot(grid, mean, color=ARM_COLORS[arm], linewidth=2.0, label=code)
+            ax.plot(grid, mean, color=ARM_COLORS[arm], linewidth=2.0, label=ALL_ARMS[arm])
             any_line = True
         ax.set_title(title, fontsize=11, fontweight="semibold")
         ax.set_xlabel("Training timestep")
@@ -169,12 +195,11 @@ def plot_reward_curves(
                 continue
             ax.plot(curve["step"], curve["value"], color=ARM_COLORS[arm], alpha=0.25, linewidth=1.0)
         result = resample_mean(curves)
-        code, variant = ALL_ARMS[arm]
         if result is not None:
             grid, mean = result
             ax.plot(grid, mean, color=ARM_COLORS[arm], linewidth=2.4, label=f"mean of {len(curves)} seeds")
             ax.legend(loc="lower right", frameon=False, fontsize=8)
-        ax.set_title(f"{code} — {variant}", fontsize=11, fontweight="semibold")
+        ax.set_title(f"{ALL_ARMS[arm]} — {arm}", fontsize=11, fontweight="semibold")
         ax.set_xlabel("Training timestep")
         ax.set_ylabel("Episode return (rollout mean)")
         ax.grid(alpha=0.25, linewidth=0.8)
@@ -198,6 +223,7 @@ def plot_combined_overlay(
     title: str,
     ylabel: str,
     out_path: Path,
+    subtitle: str = "",
 ) -> None:
     fig, ax = plt.subplots(figsize=(9.5, 6.0))
     for arm in arms:
@@ -206,9 +232,8 @@ def plot_combined_overlay(
         if result is None:
             continue
         grid, mean = result
-        code, variant = ALL_ARMS[arm]
-        ax.plot(grid, mean, color=ARM_COLORS[arm], linewidth=2.2, label=f"{code} {variant}")
-    ax.set_title(title, fontsize=13, fontweight="semibold")
+        ax.plot(grid, mean, color=ARM_COLORS[arm], linewidth=2.2, label=ALL_ARMS[arm])
+    ax.set_title(title + subtitle, fontsize=13, fontweight="semibold")
     ax.set_xlabel("Training timestep")
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.25, linewidth=0.8)
@@ -273,14 +298,30 @@ def plot_kpi_bars(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study-dir", type=Path, default=DEFAULT_STUDY_DIR)
+    parser.add_argument("--arms", nargs="+", default=ALL_FIVE,
+                        help=f"Arms to plot, in legend order. Choose from {ALL_FIVE}.")
     parser.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_SEEDS)
+    parser.add_argument("--smoothing", type=float, default=0.0,
+                        help=f"TensorBoard-style EMA weight applied per seed curve; "
+                             f"0 disables it. The lambda1p0 figures use {SMOOTHING_WEIGHT}.")
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "reports" / "safety_matrix_1M" / "figures")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    arms = ALL_FIVE
+    unknown = [a for a in args.arms if a not in ALL_ARMS]
+    if unknown:
+        raise SystemExit(f"unknown arms {unknown}; choose from {ALL_FIVE}")
+    if not 0.0 <= args.smoothing < 1.0:
+        raise SystemExit("--smoothing must lie in [0, 1)")
+    arms = list(args.arms)
+    codes = "/".join(ALL_ARMS[a] for a in arms)
+    smoothing_note = (
+        f"\n(EMA-smoothed, weight={args.smoothing}; mean of {len(args.seeds)} seeds)"
+        if args.smoothing > 0.0
+        else f"\n(raw scalars; mean of {len(args.seeds)} seeds)"
+    )
 
     training_tags = ["rollout/ep_rew_mean", "rollout/collisions_per_km", "rollout/distance_m"]
     stability_tags = [
@@ -294,35 +335,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     all_tags = training_tags + stability_tags + cbf_field_tags
 
-    print(f"Reading TensorBoard scalars from {args.study_dir}")
-    curves = load_all(args.study_dir, arms, args.seeds, all_tags)
+    print(f"Reading TensorBoard scalars from {args.study_dir} for {codes}")
+    curves = load_all(args.study_dir, arms, args.seeds, all_tags, smoothing=args.smoothing)
 
     # --- 1. Training signals -------------------------------------------------
+    # One file per signal: these are read side by side at full width, not as a
+    # three-panel strip.
+    training_panels = [
+        ("rollout/ep_rew_mean", "Episode return", "Episode return", "training_episode_return.png"),
+        ("rollout/collisions_per_km", "Training-rollout collisions/km",
+         "Collisions / km (rollout)", "training_collisions_per_km.png"),
+        ("rollout/distance_m", "Training-rollout episode distance",
+         "Distance (m)", "training_distance_m.png"),
+    ]
+    for tag, title, ylabel, filename in training_panels:
+        plot_combined_overlay(
+            curves, tag, arms,
+            title=f"{title}: {codes}",
+            subtitle=smoothing_note,
+            ylabel=ylabel,
+            out_path=args.out / filename,
+        )
     plot_reward_curves(curves, arms, args.out / "training_reward_curves.png")
-    plot_combined_overlay(
-        curves, "rollout/collisions_per_km", arms,
-        title="Training-rollout collisions/km, all 5 arms",
-        ylabel="Collisions / km (rollout)",
-        out_path=args.out / "training_collisions_per_km.png",
-    )
-    plot_combined_overlay(
-        curves, "rollout/distance_m", arms,
-        title="Training-rollout episode distance, all 5 arms",
-        ylabel="Distance (m)",
-        out_path=args.out / "training_distance_m.png",
-    )
 
     long_df = collect(args.study_dir, arms, args.seeds)
     safety_agg = aggregate_across_seeds(long_df, SAFETY_KPIS)
     task_agg = aggregate_across_seeds(long_df, TASK_KPIS)
     plot_kpi_bars(
         safety_agg, SAFETY_KPIS,
-        title="Final post-training safety/CBF KPIs (mean ± SD across 7 seeds)",
+        title=f"Final post-training safety/CBF KPIs (mean ± SD across {len(args.seeds)} seeds)",
         out_path=args.out / "final_kpi_safety_bars.png",
     )
     plot_kpi_bars(
         task_agg, TASK_KPIS,
-        title="Final post-training task/comfort KPIs (mean ± SD across 7 seeds)",
+        title=f"Final post-training task/comfort KPIs (mean ± SD across {len(args.seeds)} seeds)",
         out_path=args.out / "final_kpi_task_bars.png",
     )
 
@@ -331,37 +377,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         curves,
         ["train/approx_kl", "train/clip_fraction", "train/explained_variance", "train/std"],
         ["Approx. KL", "Clip fraction", "Explained variance", "Action std (train/std)"],
-        arms, ncols=2, suptitle="PPO optimizer health, all 5 arms",
+        arms, ncols=2, suptitle=f"PPO optimizer health: {codes}" + smoothing_note,
         out_path=args.out / "stability_optimizer_health.png",
     )
     plot_tag_grid(
         curves,
         ["train/value_loss", "train/policy_gradient_loss", "train/entropy_loss", "train/loss"],
         ["Value loss", "Policy-gradient loss", "Entropy loss", "Total loss"],
-        arms, ncols=2, suptitle="PPO loss curves, all 5 arms",
+        arms, ncols=2, suptitle=f"PPO loss curves: {codes}" + smoothing_note,
         out_path=args.out / "stability_losses.png",
     )
 
     # --- 3. CBF field ------------------------------------------------------
-    plot_tag_grid(
-        curves,
-        ["train/cbf_mean_loss", "train/cbf_mean_correction", "train/cbf_mean_infeasible_rate"],
-        ["CBF mean loss", "CBF mean correction norm", "CBF mean infeasible rate"],
-        CBF_TRAINING_ARMS, ncols=3,
-        suptitle="CBF projection signal during training (B2 / C1 / C2 only)",
-        out_path=args.out / "cbf_field_projection_signal.png",
-    )
-    plot_tag_grid(
-        curves,
-        [
-            "train/actor_g_cbf_norm", "train/actor_g_ppo_norm",
-            "train/actor_g_cbf_to_g_ppo_ratio", "train/actor_g_ppo_g_cbf_cosine",
-        ],
-        ["Actor grad norm (CBF term)", "Actor grad norm (PPO term)", "Grad ratio (CBF/PPO)", "Grad cosine (CBF, PPO)"],
-        ACTOR_GRADIENT_ARMS, ncols=2,
-        suptitle="Actor gradient signal (B2 / C2 only)",
-        out_path=args.out / "cbf_field_actor_gradient.png",
-    )
+    # These tags only exist where the mechanism does, so the figures are drawn
+    # over the selected arms that have it -- and skipped when none do.
+    cbf_arms = [a for a in arms if a in CBF_TRAINING_ARMS]
+    gradient_arms = [a for a in arms if a in ACTOR_GRADIENT_ARMS]
+    if cbf_arms:
+        # The correction norm also stands alone: it is the one projection signal
+        # read on its own rather than against the other two.
+        plot_combined_overlay(
+            curves, "train/cbf_mean_correction", cbf_arms,
+            title=f"CBF mean correction norm: {' / '.join(ALL_ARMS[a] for a in cbf_arms)}",
+            subtitle=smoothing_note,
+            ylabel="Correction norm",
+            out_path=args.out / "cbf_correction_norm.png",
+        )
+        plot_tag_grid(
+            curves,
+            ["train/cbf_mean_loss", "train/cbf_mean_correction", "train/cbf_mean_infeasible_rate"],
+            ["CBF mean loss", "CBF mean correction norm", "CBF mean infeasible rate"],
+            cbf_arms, ncols=3,
+            suptitle="CBF projection signal during training "
+                     f"({' / '.join(ALL_ARMS[a] for a in cbf_arms)} only)" + smoothing_note,
+            out_path=args.out / "cbf_field_projection_signal.png",
+        )
+    else:
+        print("  skipping cbf_field_projection_signal.png: no selected arm trains with the CBF")
+    if gradient_arms:
+        plot_tag_grid(
+            curves,
+            [
+                "train/actor_g_cbf_norm", "train/actor_g_ppo_norm",
+                "train/actor_g_cbf_to_g_ppo_ratio", "train/actor_g_ppo_g_cbf_cosine",
+            ],
+            ["Actor grad norm (CBF term)", "Actor grad norm (PPO term)", "Grad ratio (CBF/PPO)", "Grad cosine (CBF, PPO)"],
+            gradient_arms, ncols=2,
+            suptitle="Actor gradient signal "
+                     f"({' / '.join(ALL_ARMS[a] for a in gradient_arms)} only)" + smoothing_note,
+            out_path=args.out / "cbf_field_actor_gradient.png",
+        )
+    else:
+        print("  skipping cbf_field_actor_gradient.png: no selected arm has an actor-loss CBF term")
 
     print(f"\nAll figures written to {args.out.resolve()}")
     return 0
