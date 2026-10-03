@@ -209,12 +209,44 @@ def suppression_batch(
         np.where(rank == 2, "interior", np.where(rank == 1, "rank1_face", "rank0_vertex")),
     )
 
-    correction = np.linalg.norm(
-        (mu_box - mu_safe).detach().cpu().numpy(), axis=1
-    )
+    correction_vec = (mu_box - mu_safe).detach().cpu().numpy()
+    correction = np.linalg.norm(correction_vec, axis=1)
+
+    # --- tangent SPACE (what J does) versus tangent CONE (what the constrained
+    # --- step should do).
+    #
+    # J g removes the whole normal component of g. The solution of
+    #     max_d  g^T d - ||d||^2 / 2eta   s.t.  n^T d <= 0
+    # is the projection onto the tangent *cone*,
+    #     g* = g - max(0, n^T g) / ||n||^2 * n,
+    # which removes that component only when it points out of the safe set. So
+    #     g* - J g = min(0, n^T g) / ||n||^2 * n,
+    # i.e. the two agree iff n^T g >= 0, and where n^T g < 0 the projection
+    # Jacobian has destroyed a descent direction that was already feasible.
+    #
+    # Projection onto a halfspace moves along its outward normal, so for a
+    # single active face the correction direction recovers n with its
+    # orientation: n_hat = (mu_box - mu_safe) / ||mu_box - mu_safe||. No
+    # constraint-row bookkeeping needed, and it is exactly the quantity already
+    # logged as correction_norm.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        n_hat = correction_vec / correction[:, None]
+    n_hat = np.nan_to_num(n_hat)
+    n_dot_g = np.einsum("ij,ij->i", n_hat, g_safe_np)
+
+    # g* = g - max(0, n^T g) n_hat  (n_hat is already unit)
+    g_star = g_safe_np - np.maximum(0.0, n_dot_g)[:, None] * n_hat
+    r_star = np.linalg.norm(g_safe_np - g_star, axis=1) / (norm_safe + EPS)
+    # How far the projection Jacobian sits from the constrained-optimal step.
+    jacobian_vs_optimal = np.linalg.norm(g_box_np - g_star, axis=1) / (norm_safe + EPS)
+
     return pd.DataFrame(
         {
             "r_perp": r_perp,
+            "r_star": r_star,
+            "jacobian_vs_optimal": jacobian_vs_optimal,
+            "n_dot_g": n_dot_g,
+            "kills_feasible_direction": (n_dot_g < 0) & (correction > 1e-9),
             "r_clip": r_clip,
             "regime": regime,
             "feasible": feasible,
@@ -319,6 +351,19 @@ def summarize(frame: pd.DataFrame, *, grad_floor: float = 1e-3) -> dict[str, Any
     for regime, group in frame.groupby("regime"):
         out[f"P({regime})"] = float(len(group) / len(frame))
         out[f"E[r_perp|{regime}]"] = float(group["r_perp"].mean())
+
+    # Tangent-space (J) versus tangent-cone (constrained-optimal) step, on the
+    # rank-1 samples where a single active face makes the comparison exact.
+    r1 = frame[frame["regime"] == "rank1_face"]
+    if len(r1):
+        out["E[r_perp|rank1]"] = float(r1["r_perp"].mean())
+        out["E[r_star|rank1]"] = float(r1["r_star"].mean())
+        out["P(J kills feasible dir|rank1)"] = float(r1["kills_feasible_direction"].mean())
+        out["E[||Jg-g*||/||g|| |rank1]"] = float(r1["jacobian_vs_optimal"].mean())
+        killed = r1[r1["kills_feasible_direction"]]
+        if len(killed):
+            out["E[r_perp|rank1,killed]"] = float(killed["r_perp"].mean())
+            out["E[r_star|rank1,killed]"] = float(killed["r_star"].mean())
     finite = frame[frame["g_safe_norm"] > 1e-9]
     if len(finite) > 2:
         out["corr(r_perp, correction_norm)"] = float(
