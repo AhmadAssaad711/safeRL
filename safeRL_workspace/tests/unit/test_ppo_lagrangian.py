@@ -372,3 +372,18 @@ def test_dual_variable_survives_save_and_load(tmp_path):
     assert restored.dual.value == pytest.approx(saved)
     assert restored.cmdp_config == model.cmdp_config
     assert restored.cost_source == model.cost_source
+
+
+def test_model_loads_without_an_environment(tmp_path):
+    """Evaluation paths load a checkpoint with env=None.
+
+    On that path SB3 never sets an action space before __init__ runs, so an
+    unconditional space check breaks every evaluation of a CMDP checkpoint.
+    """
+
+    model = _make_model(COST_SOURCE_ACTION)
+    path = tmp_path / "no_env.zip"
+    model.save(str(path))
+    restored = PPOLagrangian.load(str(path), device="cpu")
+    assert restored.cost_source == COST_SOURCE_ACTION
+    assert restored.cmdp_config == model.cmdp_config

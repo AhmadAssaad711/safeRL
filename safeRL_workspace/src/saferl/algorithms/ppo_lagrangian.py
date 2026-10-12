@@ -345,11 +345,17 @@ class PPOLagrangian(LatentActionPPO):
         )
         kwargs["rollout_buffer_kwargs"] = buffer_kwargs
         super().__init__(*args, **kwargs)
+        # SB3's load() path constructs before restoring the spaces and the
+        # policy from the pickle, and load(env=None) never sets an action
+        # space at all, so both checks are conditional on the attribute
+        # actually existing yet.
         if hasattr(self, "policy") and not isinstance(
             self.policy, CMDPActorCriticPolicy
         ):
             raise TypeError("PPOLagrangian requires CMDPActorCriticPolicy")
-        if not isinstance(self.action_space, spaces.Box):
+        if getattr(self, "action_space", None) is not None and not isinstance(
+            self.action_space, spaces.Box
+        ):
             raise TypeError("PPOLagrangian requires a Box action space")
 
     # ------------------------------------------------------------------

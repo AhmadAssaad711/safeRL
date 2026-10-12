@@ -126,8 +126,12 @@ Both land at buffer index `t`.
 `_state_costs` calls `env.env_method("current_constraint_system")` once and
 receives a list for all envs. The existing rollout loop calls
 `set_projection_record` once **per env** (20 IPC calls per step); the cost adds
-one broadcast instead. C1 will still be somewhat slower than C2 because C2
-needs no extra IPC at all.
+one broadcast instead.
+
+Measured, C2 is the slower arm, not C1: 20k steps took **108 s for
+CMDP-Action** against **91 s for CMDP-State** at `n_envs = 20`. C2 runs 20
+`project_polytope_2d_numpy` calls per step in a Python loop, which costs more
+than one broadcast IPC. An earlier version of this note predicted the opposite.
 
 ### 4.4 `collect_rollouts` is duplicated rather than hooked
 
@@ -160,50 +164,69 @@ Cost is driven down, so the pessimistic bound is the **upper** one. Using
 policy would be rewarded for increasing cost. There is no test that can catch
 this from the outside cheaply, so it is called out here.
 
+## 4a. Smoke results, 2026-10-12
+
+Both arms run end-to-end at 20k steps, `n_envs = 20`, `Q1_stable`,
+`neighbors_count = 7` (41D observation with `--drop-ego-speed-slot`).
+
+| | CMDP-Action | CMDP-State |
+|---|---|---|
+| wall clock, 20k steps | 108 s | 91 s |
+| `cost_limit` used | 0.05 (placeholder) | 0.5 (placeholder) |
+| `J_C` measured | 13 - 21 | 0.90 |
+| `lambda` after 20 updates | 0 -> 35.0 | 0 -> 0.61 |
+| `cost_explained_variance` | ~1e-5 | ~4e-5 |
+
+Three things to read from this, none of which are bugs but all of which matter
+for choosing `d`:
+
+1. **`c_a` is dominated by the infeasibility constant.** `box_bound` on the
+   [-3,3]^2 box is `0.5 * (6^2 + 6^2) = 36.0`, and an untrained policy is
+   infeasible often, so a mean of 13-21 implies roughly 40-55% of steps have an
+   empty safe set. In that regime `c_a` behaves closer to
+   `36 * P(infeasible)` than to a graded distance. The choice of `box_bound` is
+   still right -- a solver-fallback distance would score those states as nearly
+   free -- but `d_a` has to be set against this distribution, not against the
+   feasible-state distances.
+2. **lambda diverges monotonically** when `d` is far below the achievable cost.
+   With `d = 0.05` against `J_C ~ 17` and `dual_lr = 0.1`, lambda climbs ~1.7
+   per update and never turns around. That is correct dual-ascent behaviour on
+   an infeasible constraint, and it is exactly why `cost_limit` has no default.
+3. **The cost critic does not fit at this scale.** `cost_explained_variance`
+   is ~1e-5 for both arms with `cost_value_loss` in the 5e4-1e5 range for C2.
+   At 20k steps that is uninformative, but it is the first number to check on a
+   real run: if it stays near zero, `A_C` is noise and the constraint is being
+   enforced through lambda alone.
+
+Diagnostics are written to `cmdp_dual.csv` in the run directory, and the final
+dual state is printed as `[ppo-progression] CMDP dual state`.
+
 ## 5. What is NOT built, and why
 
-### 5.1 Variant registration and the C -> D rename are blocked on the live sweep
+### 5.1 The C -> D rename of existing artifacts
 
-The B2 lambda sweep launched 2026-10-12 08:07 runs `python -m
-scripts.training.run_ppo_cbf_progression` as a **fresh subprocess per (lambda,
-seed)**, 42 of them over roughly 40 hours. Every one imports
-`scripts/training/run_ppo_cbf_progression.py`, `scripts/ops/run_safety_matrix_study.py`
-and `scripts/common/*` from disk at launch.
+Registration **is** applied (the B2 sweep was stopped by request on
+2026-10-12 at 10:42, after lambda=0 seeds 307 and 327 completed; seeds 347 and
+367 hold 825k checkpoints and resume rather than restart). What remains is the
+artifact-side rename.
 
-Editing any of those files while the sweep is in flight would mean **later
-arms of the sweep run different code from earlier arms**. Even a strictly
-additive change is not worth that: the sweep is the data behind a paper table.
+`VARIANT_LETTERS` now carries the paper-facing letters and
+`VARIANT_LETTER_ALIASES` maps the pre-rename `C1`/`C2` to
+`ppo_cbf_diff_reward_only` / `ppo_cbf_projected`, with
+`variant_for_letter(letter, legacy=True)` for reading old labels. The
+*variant keys* were not renamed, so **no existing checkpoint or signature is
+affected** — the rename is presentational.
 
-So the following are written up but not applied:
+Still to do on the artifact side:
 
-1. `VARIANT_SPECS` entries for `ppo_cmdp_state` and `ppo_cmdp_action`
-   (`execution_mode: "box"`, `projected_mean: False`,
-   `detached_actor_loss: False`, plus a new `cmdp: True` flag).
-2. `TENSORBOARD_VARIANT_IDS` entries (suggest `cmdps`, `cmdpa`).
-3. A dispatch branch in `build_model` / `load_model` next to the existing
-   `projected_mean` and `detached_actor_loss` branches
-   (`run_ppo_cbf_progression.py:2003-2071`).
-4. CLI args: `--cost-limit`, `--gamma-c`, `--gae-lambda-c`, `--dual-lr`,
-   `--dual-init`, `--cost-vf-coef`, `--cmdp-infeasible-rule`.
-5. `_variant_relevant_settings` entries so the CMDP settings enter the
-   training signature **only** for the CMDP variants — this is what keeps B2's
-   signature unchanged and its checkpoints reusable.
-6. `ARMS` rows in `run_safety_matrix_study.py` for `C1_cmdp_state` and
-   `C2_cmdp_action`.
-7. The rename: `ppo_cbf_diff_reward_only` -> D1, `ppo_cbf_projected` -> D2,
-   `ppo_cbf_projected_reward_off` -> D3 in the paper-facing labels, with a
-   **backward-compatible signature alias** so existing C1/C2 checkpoints still
-   resolve. `training_signature` includes the variant name, so without an
-   alias every existing projected checkpoint becomes unreusable.
-
-**Check the sweep is finished before applying any of this:**
-
-```powershell
-Get-Content "$env:LOCALAPPDATA\Temp\saferl_runs\b2_lambda_sweep\SWEEP.log" -Tail 5
-Get-Process python -ErrorAction SilentlyContinue | Measure-Object
-```
-
-The log ends with `=== B2 lambda sweep complete ===` when done.
+1. `ARMS` rows in `run_safety_matrix_study.py` for `C1_cmdp_state` and
+   `C2_cmdp_action`, and relabelling its existing `C1_*`/`C2_*` rows to
+   `D1_*`/`D2_*`. Note those labels are **directory names** under the
+   out-base, so renaming them orphans existing run directories unless the
+   alias is used when reading them.
+2. Report builders and figure filenames under `artifacts/reports/` that embed
+   `C1`/`C2` with the old meaning.
+3. `docs/` and `trial_log.md` references to C1/C2 predating 2026-10-12.
 
 ### 5.2 The shared gradient-clip fix is not done
 
@@ -268,15 +291,39 @@ collection. The baseline comparison above is the evidence.
   `Git commit: unknown` in the published safety-matrix report, and it means
   CMDP runs will also lack a recorded SHA until that is addressed.
 
-## 9. Order of work to a first CMDP run
+## 9. How to run, and what is left
 
-1. Wait for `=== B2 lambda sweep complete ===`.
-2. Apply §5.1 items 1-6, then the §5.1 item 7 rename with aliases. Run
-   `python -m scripts.ops.check_repository_policy` and the focused tests.
-3. Confirm the §6 open questions.
-4. Smoke: 50k steps, one seed, each CMDP variant, with an explicit
-   `--cost-limit`, checking `cmdp/lambda` moves and
-   `cost_explained_variance` is not pinned at zero.
-5. Profile `c_s` and `c_a` to choose `d_s` and `d_a` (§5.3).
-6. Apply the gradient-clip fix (§5.2).
-7. Real runs.
+Both arms are runnable now. A working invocation, matching the canonical
+safety-matrix contract:
+
+```powershell
+cd "safeRL_workspace"
+$env:PYTHONPATH = "$PWD\src"
+python -m scripts.training.run_ppo_cbf_progression `
+  --variants ppo_cmdp_action --seeds 307 --timesteps 20000 `
+  --n-envs 20 --n-steps 1000 --batch-size 100 `
+  --traffic-model mtm --device cpu --ppo-config Q1_stable `
+  --remove-vehicle-dimensions --expose-target-y --drop-ego-speed-slot `
+  --lateral-target field --lateral-field-wall-weight 1.0 --lateral-y-weight 0.96 `
+  --potential-field-weight 0 `
+  --env-config-json '{\"neighbors_count\": 7}' --max-neighbor-constraints 7 `
+  --cost-limit 0.05 --dual-lr 0.1 `
+  --output-dir <explicit path>
+```
+
+Use `--variants ppo_cmdp_state` plus
+`--state-cost-barrier-form distance` for C1. `--cost-limit` is required and
+has no default.
+
+Remaining before a *reportable* result:
+
+1. **Choose `d_s` and `d_a`** from measured distributions (§5.3). The smoke
+   values are placeholders and lambda diverges under them.
+2. **Apply the gradient-clip fix** (§5.2) — locked as a prerequisite, and the
+   cost critic adds a third network to the same shared budget.
+3. **Confirm the §6 open questions**, principally whether `V_C` should see the
+   CBF context.
+4. **Watch `cost_explained_variance`.** At 20k steps it is ~1e-5; if it stays
+   there on a real run, `A_C` is noise and the constraint is being carried by
+   lambda alone.
+5. Finish the artifact-side rename (§5.1).

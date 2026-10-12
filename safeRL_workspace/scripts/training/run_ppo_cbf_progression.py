@@ -116,6 +116,15 @@ from saferl.safety.state_cost import (
     default_parameter_set,
     state_cost_parameters_from_mapping,
 )
+from saferl.algorithms.cmdp import CMDPConfig, SUPPORTED_COST_ESTIMATORS
+from saferl.algorithms.ppo_lagrangian import (
+    CMDPActorCriticPolicy,
+    PPOLagrangian,
+)
+from saferl.safety.action_cost import (
+    SUPPORTED_INFEASIBLE_RULES,
+    BOX_BOUND_RULE,
+)
 
 
 PROGRESSION_SCHEMA_VERSION = 11
@@ -316,6 +325,38 @@ VARIANT_SPECS: dict[str, dict[str, Any]] = {
         "detached_actor_loss": False,
         "safety_critic": False,
     },
+    # Constrained-MDP arms. Safety is a separate constrained objective
+    # ``J_C <= d`` with its own critic and a dual variable, not a reward term,
+    # so ``reward_penalty`` is False: adding the intervention penalty as well
+    # would price the same quantity twice.
+    #
+    # They train with the HOCBF filter OFF (``execution_mode`` "box"). For the
+    # action cost the projection is evaluated only to score how incompatible
+    # the proposed action was; it never alters the transition.
+    "ppo_cmdp_state": {
+        "label": "CMDP with HOCBF state cost (cost critic + dual)",
+        "level": 3,
+        "execution_mode": "box",
+        "reward_penalty": False,
+        "projected_mean": False,
+        "differentiable_actor_loss": False,
+        "detached_actor_loss": False,
+        "safety_critic": False,
+        "cmdp": True,
+        "cmdp_cost_source": "state",
+    },
+    "ppo_cmdp_action": {
+        "label": "CMDP with HOCBF action-distance cost (cost critic + dual)",
+        "level": 3,
+        "execution_mode": "box",
+        "reward_penalty": False,
+        "projected_mean": False,
+        "differentiable_actor_loss": False,
+        "detached_actor_loss": False,
+        "safety_critic": False,
+        "cmdp": True,
+        "cmdp_cost_source": "action",
+    },
 }
 # Preserve the historical default ladder. The canonical 1M notebook passes
 # its requested variants explicitly, so older calls do not silently add
@@ -454,7 +495,48 @@ TENSORBOARD_VARIANT_IDS = {
     "ppo_cbf_projected_reward_off": "pro0",
     "ppo_cbf_projected": "pro",
     "ppo_cbf_integrated_actor_only": "iao",
+    "ppo_cmdp_state": "cmdps",
+    "ppo_cmdp_action": "cmdpa",
 }
+
+# Paper-facing arm letters. The differentiable-projection family is the D
+# family; C is the constrained-MDP family. The previous labels C1/C2 referred
+# to the projection arms, so anything written before 2026-10-12 using C1/C2
+# means D1/D2. ``VARIANT_LETTER_ALIASES`` keeps those old names resolvable so
+# existing checkpoints and manifests are not orphaned by the rename.
+VARIANT_LETTERS = {
+    "ppo_nominal": "A1",
+    "ppo_hocbf_state_cost_raw": "B1",
+    "ppo_cbf_nd_reward_actor": "B2",
+    "ppo_cmdp_state": "C1",
+    "ppo_cmdp_action": "C2",
+    "ppo_cbf_diff_reward_only": "D1",
+    "ppo_cbf_projected": "D2",
+    "ppo_cbf_projected_reward_off": "D3",
+}
+# Historical letter -> variant, for reading pre-rename labels and run names.
+VARIANT_LETTER_ALIASES = {
+    "C1": "ppo_cbf_diff_reward_only",
+    "C2": "ppo_cbf_projected",
+}
+
+
+def variant_for_letter(letter: str, *, legacy: bool = False) -> str:
+    """Resolve an arm letter to a variant key.
+
+    ``legacy=True`` reads the pre-2026-10-12 meaning of C1/C2, which is what
+    existing checkpoint paths, manifests and report directories use.
+    """
+
+    name = str(letter).strip().upper()
+    if legacy and name in VARIANT_LETTER_ALIASES:
+        return VARIANT_LETTER_ALIASES[name]
+    for variant, assigned in VARIANT_LETTERS.items():
+        if assigned == name:
+            return variant
+    raise KeyError(
+        f"unknown arm letter {letter!r}; known: {sorted(VARIANT_LETTERS.values())}"
+    )
 
 
 @dataclass(frozen=True)
@@ -831,6 +913,48 @@ def training_topology(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _cmdp_config_for_variant(
+    variant: str, args: argparse.Namespace
+) -> CMDPConfig:
+    """Resolve the CMDP settings for one constrained arm.
+
+    ``--cost-limit`` has no default: ``d`` has to be chosen from measured cost
+    distributions, and inventing one silently would make a run look valid when
+    its constraint is meaningless.
+    """
+
+    if not bool(VARIANT_SPECS[variant].get("cmdp", False)):
+        raise ValueError(f"{variant} is not a CMDP arm")
+    cost_limit = getattr(args, "cost_limit", None)
+    if cost_limit is None:
+        raise ValueError(
+            f"{variant} requires an explicit --cost-limit; see "
+            "docs/cmdp_implementation_notes.md for how d_s and d_a are chosen"
+        )
+    # gamma_c defaults to the task discount, which lives in the resolved PPO
+    # config rather than in args: --gamma is None unless overridden, and the
+    # preset supplies the value.
+    ppo_config = resolved_ppo_config(args)
+    return CMDPConfig(
+        cost_limit=float(cost_limit),
+        gamma_c=(
+            float(ppo_config["gamma"])
+            if getattr(args, "gamma_c", None) is None
+            else float(args.gamma_c)
+        ),
+        gae_lambda_c=(
+            float(ppo_config["gae_lambda"])
+            if getattr(args, "gae_lambda_c", None) is None
+            else float(args.gae_lambda_c)
+        ),
+        dual_lr=float(getattr(args, "dual_lr", 0.01)),
+        dual_init=float(getattr(args, "dual_init", 0.0)),
+        dual_max=getattr(args, "dual_max", None),
+        use_penalty_scaling=bool(getattr(args, "cmdp_penalty_scaling", False)),
+        cost_estimator=str(getattr(args, "cost_estimator", "batch_mean")),
+    )
+
+
 def _effective_training_settings(
     variant: str, args: argparse.Namespace
 ) -> dict[str, Any]:
@@ -838,6 +962,14 @@ def _effective_training_settings(
 
     spec = VARIANT_SPECS[variant]
     settings: dict[str, Any] = {
+        # Emitted only for the CMDP arms, so adding the constrained family
+        # leaves every existing variant's signature -- and therefore its
+        # reusable checkpoints -- byte-identical.
+        **(
+            {"cmdp": _cmdp_config_for_variant(variant, args).as_dict()}
+            if bool(spec.get("cmdp", False))
+            else {}
+        ),
         "lambda_delta": (
             float(args.lambda_delta) if bool(spec["reward_penalty"]) else 0.0
         ),
@@ -2044,6 +2176,42 @@ def build_model(
             policy_kwargs=detached_policy_kwargs,
             **common_model_kwargs,
         )
+    if bool(spec.get("cmdp", False)):
+        # The cost critic needs the base observation width to slice the CBF
+        # context off, and the algorithm needs the full layout for the
+        # measurement-only projection, so the dim goes to both.
+        cmdp_policy_kwargs = {
+            **common_policy_kwargs,
+            "cbf_base_observation_dim": int(base_observation_dim),
+            "cost_critic_sees_context": bool(
+                getattr(args, "cost_critic_sees_context", False)
+            ),
+        }
+        return PPOLagrangian(
+            CMDPActorCriticPolicy,
+            train_env,
+            cmdp_config=_cmdp_config_for_variant(variant, args),
+            cost_source=str(spec["cmdp_cost_source"]),
+            # lambda_s only enables the cost definition here; it never reaches
+            # the reward. The environment's own state cost stays off.
+            state_cost_params=StateCostParameters(
+                **{
+                    **default_parameter_set(
+                        str(getattr(args, "state_cost_barrier_form", ELLIPSE_BARRIER_FORM))
+                    ),
+                    "lambda_s": 1.0,
+                    "barrier_form": str(
+                        getattr(args, "state_cost_barrier_form", ELLIPSE_BARRIER_FORM)
+                    ),
+                }
+            ),
+            infeasible_rule=str(
+                getattr(args, "cmdp_infeasible_rule", BOX_BOUND_RULE)
+            ),
+            cost_vf_coef=float(getattr(args, "cost_vf_coef", 0.5)),
+            policy_kwargs=cmdp_policy_kwargs,
+            **common_model_kwargs,
+        )
     return LatentActionPPO(
         "MlpPolicy",
         train_env,
@@ -2066,6 +2234,8 @@ def load_model(
         model_class = ProjectedCBFPPO
     elif bool(spec.get("detached_actor_loss", False)):
         model_class = DetachedCBFActorPPO
+    elif bool(spec.get("cmdp", False)):
+        model_class = PPOLagrangian
     else:
         model_class = LatentActionPPO
     return model_class.load(str(path), device=device, env=env)
@@ -2296,6 +2466,29 @@ def train_variant(
             json.dumps(completion, indent=2, sort_keys=True), encoding="utf-8"
         )
         pending_signature_path.unlink(missing_ok=True)
+        # The CMDP arms keep their own trace: the dual variable, the constraint
+        # estimate and the cost critic's fit. Written to its own file so the
+        # analysis scripts that read actor_gradients.csv are unaffected.
+        cmdp_diagnostics = getattr(model, "cmdp_training_diagnostics", None)
+        if cmdp_diagnostics:
+            cmdp_frame = pd.DataFrame(cmdp_diagnostics)
+            cmdp_frame.to_csv(run_dir / "cmdp_dual.csv", index=False)
+            latest_cmdp = cmdp_frame.iloc[-1]
+            print(
+                "[ppo-progression] CMDP dual state",
+                {
+                    "lambda": float(latest_cmdp.get("cmdp/lambda", np.nan)),
+                    "J_C": float(latest_cmdp.get("cmdp/cost_objective", np.nan)),
+                    "d": float(latest_cmdp.get("cmdp/cost_limit", np.nan)),
+                    "violation": float(
+                        latest_cmdp.get("cmdp/constraint_violation", np.nan)
+                    ),
+                    "cost_explained_variance": float(
+                        latest_cmdp.get("cost_explained_variance", np.nan)
+                    ),
+                },
+                flush=True,
+            )
         diagnostics = getattr(model, "cbf_training_diagnostics", None)
         if diagnostics:
             diagnostic_frame = pd.DataFrame(diagnostics)
@@ -4626,6 +4819,99 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Coefficient for the non-differentiable stopped-gradient hard-CBF "
             "mean-target loss; active only for detached actor-feedback variants."
+        ),
+    )
+    parser.add_argument(
+        "--cost-limit",
+        type=float,
+        default=None,
+        help=(
+            "CMDP constraint budget d, as an average per-step cost. Required "
+            "by the CMDP arms and deliberately without a default: it must be "
+            "chosen from measured cost distributions, not inherited. See "
+            "docs/cmdp_implementation_notes.md."
+        ),
+    )
+    parser.add_argument(
+        "--gamma-c",
+        type=float,
+        default=None,
+        help=(
+            "Safety discount for the cost critic. Unset follows --gamma, which "
+            "is the locked starting choice: do not add a second horizon "
+            "hyperparameter until the baseline works."
+        ),
+    )
+    parser.add_argument(
+        "--gae-lambda-c",
+        type=float,
+        default=None,
+        help="GAE lambda for the cost channel; unset follows --gae-lambda.",
+    )
+    parser.add_argument(
+        "--dual-lr",
+        type=float,
+        default=0.01,
+        help=(
+            "Step size for the projected dual ascent "
+            "lambda <- [lambda + lr * (J_C - d)]_+, applied once per rollout."
+        ),
+    )
+    parser.add_argument(
+        "--dual-init",
+        type=float,
+        default=0.0,
+        help="Initial Lagrange multiplier; 0 starts with the cost term off.",
+    )
+    parser.add_argument(
+        "--dual-max",
+        type=float,
+        default=None,
+        help="Optional cap on lambda. Unset leaves it unbounded above.",
+    )
+    parser.add_argument(
+        "--cost-estimator",
+        choices=sorted(SUPPORTED_COST_ESTIMATORS),
+        default="batch_mean",
+        help=(
+            "How the scalar J_C driving the dual update is formed. "
+            "'batch_mean' is the average per-step cost, which keeps d in "
+            "instantaneous-cost units and cannot be gamed by crashing early."
+        ),
+    )
+    parser.add_argument(
+        "--cost-vf-coef",
+        type=float,
+        default=0.5,
+        help="Weight on the cost critic's regression loss.",
+    )
+    parser.add_argument(
+        "--cmdp-infeasible-rule",
+        choices=sorted(SUPPORTED_INFEASIBLE_RULES),
+        default=BOX_BOUND_RULE,
+        help=(
+            "How the action cost scores a state with an empty safe set. "
+            "'box_bound' is a fixed conservative constant from the action "
+            "bounds; 'fallback' is solver-dependent and diagnostic only; "
+            "'zero' is hazardous and exists for parity experiments."
+        ),
+    )
+    parser.add_argument(
+        "--cmdp-penalty-scaling",
+        action="store_true",
+        help=(
+            "Scale the actor objective by 1/(1+lambda). Off by default: it "
+            "changes the gradient magnitude and so interacts with Adam, "
+            "entropy and clipping. Use only as a stabilization experiment."
+        ),
+    )
+    parser.add_argument(
+        "--cost-critic-sees-context",
+        action="store_true",
+        help=(
+            "Give the cost critic the full augmented observation. Off by "
+            "default, so it sees the same base observation as the actor and "
+            "the other variants' critics."
         ),
     )
     parser.add_argument(
