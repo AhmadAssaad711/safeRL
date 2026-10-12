@@ -201,6 +201,78 @@ for choosing `d`:
 Diagnostics are written to `cmdp_dual.csv` in the run directory, and the final
 dual state is printed as `[ppo-progression] CMDP dual state`.
 
+## 4b. Diagnosing and fixing both arms, 2026-10-12 evening
+
+The first 1M x 7-seed attempt **failed on both arms**: the constraint was never
+satisfied and `J_C` *rose*. What follows is the chain of measurements that
+fixed it, because each step rules something out.
+
+### Attempt 1 -- projection cost, no context, dual_lr 0.01
+
+| | C2 action (d=9.3) | C1 state (d=0.5) |
+|---|---|---|
+| seeds | 6 | 7 |
+| lambda final | 121 - 127 | 3.5 - 4.2 |
+| `J_C` first -> last | 18-21 -> 21-25 | 0.78-0.96 -> 0.80-1.03 |
+| `cost_EV` | **0.0000 every seed** | 0.17 - 0.28 |
+
+### Attempt 2 -- C1 with dual_lr 0.3
+
+lambda reached **46** (so the dial was strong), but `J_C` still rose
+0.788 -> 0.846 and `cost_EV` *collapsed* 0.17-0.28 -> **0.00005**, with
+`active_fraction` going 0.987 -> **1.000**. Raising the dial is not the fix.
+
+### What each measurement ruled out
+
+1. **Row scale.** The first violation-form attempt was unnormalized and gave a
+   mean cost of ~354 in the rows' own units, `cost_value_loss` 2.3e8 and
+   `cost_EV` 0.0000. `(A_i, b_i)` and `(k A_i, k b_i)` are the same halfspace,
+   so dividing by `||A_i||` is required, not cosmetic. Fixed; cost fell to
+   ~145 and `max_row_violation` 12.6 -> 9.4.
+2. **Critic blindness.** The cost critic could not see the CBF rows that
+   *define* the cost. Turning on `--cost-critic-sees-context` took C1's
+   `cost_EV` from 0.17-0.28 to **0.72**. It did nothing for C2 (see 3).
+3. **`cost_EV` is the wrong diagnostic for an action cost.** `c_a(s,a)` depends
+   on the action, and `V_C(s)` can only predict its state-average; the
+   within-state spread from action sampling is irreducible, so `cost_EV` is
+   near zero *by construction*. C2 later drove its cost 172.8 -> 90.7 while
+   `cost_EV` stayed at 0. Judge an action cost by whether `J_C` falls, never by
+   `cost_EV`.
+4. **A near-constant cost has no gradient.** C1's `distance` barrier form fires
+   on ~100% of steps in a narrow 0.66-0.97 band -- a per-step tax, which the
+   margins in `state_cost.py` exist precisely to prevent. The `ellipse` form
+   gives `active_fraction` 0.39-0.78 with `cost_EV` 0.68.
+5. **The shared gradient clip throttles the cost critic once lambda grows.**
+   With lambda pinned at 0 a profile reached `cost_EV` 0.72; with lambda live
+   and otherwise identical settings it was 0.019. `--separate-grad-clip` is
+   therefore not optional for the CMDP arms -- and note the cost critic only
+   reaches the value group because `PPOLagrangian` overrides
+   `_gradient_parameter_groups` (commit `24cd7b7`).
+
+### Configurations that work
+
+**C1 CMDP-State** -- `ellipse` barrier form, `--cost-critic-sees-context`,
+`--separate-grad-clip`, `d_s = 0.5`, `dual_lr = 0.05`. At 175k:
+`J_C` **0.441 -> 0.400**, constraint **satisfied** (violation negative, -0.10),
+`cost_EV` 0.007 -> 0.33, `active_fraction` steady ~0.39. lambda stays small
+(0.0997) because it does not need to grow -- the correct dual signature.
+
+**C2 CMDP-Action** -- normalized `violation` form,
+`--cost-critic-sees-context`, `--separate-grad-clip`, `d_a = 60`,
+`dual_lr = 0.0007`. Drove `J_C` **172.8 -> 90.7** by 200k, which the projection
+form never did. **But it then reversed**, climbing to 215 by 550k with
+lambda 47.5 -- plain dual ascent oscillating. Relaunched with
+`--cmdp-penalty-scaling` (the `1/(1+lambda)` stabilizer), which at 175k shows
+the same early descent, 179.0 -> 92.6. **Whether the stabilizer prevents the
+reversal past 200k is unresolved as of this writing.** If it does not, the next
+levers are a `--dual-max` cap or a PID controller on the same error.
+
+### Open discrepancy to reconcile before publication
+
+C1 and C2 now differ in more than their cost source: C2 additionally carries
+`--cmdp-penalty-scaling`. Either apply it to both arms or neither before the
+two are compared, and record the choice.
+
 ## 5. What is NOT built, and why
 
 ### 5.1 The C -> D rename of existing artifacts
