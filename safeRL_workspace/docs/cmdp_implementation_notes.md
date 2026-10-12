@@ -315,6 +315,57 @@ Use `--variants ppo_cmdp_state` plus
 `--state-cost-barrier-form distance` for C1. `--cost-limit` is required and
 has no default.
 
+### The end-goal sweep, prepared
+
+Both CMDP arms are registered in `scripts/ops/run_safety_matrix_study.py` as
+`C1_cmdp_state` and `C2_cmdp_action`. They are **opt-in**: a bare invocation
+still runs the original five arms, because the CMDP arms require a
+`--cost-limit` that has no defensible default, and the launcher refuses them
+without one rather than letting fourteen runs die seconds in.
+
+`d_s` and `d_a` are different numbers, so the two arms need **separate
+invocations** — a single `--cost-limit` cannot serve both:
+
+```powershell
+cd "safeRL_workspace"
+$env:PYTHONPATH = "$PWD\src"
+
+# CMDP-Action, 1M x 7 canonical seeds
+python -m scripts.ops.run_safety_matrix_study `
+  --only C2_cmdp_action --timesteps 1000000 --concurrency 2 `
+  --extra-arg=--cost-limit --extra-arg <d_a> `
+  --out-base "$env:LOCALAPPDATA\Temp\saferl_runs\cmdp_1M_action"
+
+# CMDP-State, 1M x 7 canonical seeds
+python -m scripts.ops.run_safety_matrix_study `
+  --only C1_cmdp_state --timesteps 1000000 --concurrency 2 `
+  --extra-arg=--cost-limit --extra-arg <d_s> `
+  --out-base "$env:LOCALAPPDATA\Temp\saferl_runs\cmdp_1M_state"
+```
+
+Each is 7 runs at ~1.3 h, so roughly 5 h per arm at concurrency 2. Give each
+its own `--out-base`: a run is resumed or skipped on its output path alone, and
+the path does not encode the cost limit. Add
+`--extra-arg=--separate-grad-clip` if the gradient-clip fix is being applied.
+
+### The cost profile, for choosing d
+
+`--cost-limit 1e9 --cost-vf-coef 0` makes the constraint unreachable and the
+cost critic inert, so `lambda` stays pinned at 0 and the actor trains as plain
+filter-off PPO while the cost is still scored and logged every rollout through
+the same code path the constrained runs use. Read the converged
+`cost_mean_raw` from `cmdp_dual.csv`, then set `d` as a fraction of it.
+
+A profile run at 1M, seed 307, for both arms was launched 2026-10-12 12:12
+into `%LOCALAPPDATA%\Temp\saferl_runs\cmdp_cost_profile\{action,state}\`.
+
+**Launcher gotcha, cost two attempts:** `Start-Process -ArgumentList` first
+splits an inline `--env-config-json '{"neighbors_count": 7}'` on the internal
+space, then strips the double quotes, so Python receives `{neighbors_count:7}`
+and raises `JSONDecodeError`. Use `--env-config-file` with a JSON file instead.
+`run_safety_matrix_study.py` is unaffected: it builds an argv list for
+`subprocess.run`, which does no shell re-parsing.
+
 Remaining before a *reportable* result:
 
 1. **Choose `d_s` and `d_a`** from measured distributions (§5.3). The smoke

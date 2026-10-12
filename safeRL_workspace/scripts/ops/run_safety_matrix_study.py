@@ -121,7 +121,30 @@ ARMS: dict[str, dict[str, Any]] = {
         "extra": ["--raw-actor-eval"], "actor_lambda_flag": "--lambda-mean",
         "what": "differentiable projection + reward penalty + actor loss",
     },
+    # Constrained-MDP arms. Under the 2026-10-12 lettering these are the C
+    # family and the two projection arms above are D1/D2; the labels here are
+    # kept as-is because they are output *directory* names and renaming them
+    # would orphan every existing run directory. See
+    # docs/cmdp_implementation_notes.md.
+    #
+    # They carry no actor-loss coefficient, so --actor-lambda does not apply.
+    # They need --cost-limit, which has no default and must come from measured
+    # cost distributions; pass it through --extra-arg, e.g.
+    #   --extra-arg=--cost-limit --extra-arg 0.35
+    "C1_cmdp_state": {
+        "variants": ["ppo_cmdp_state"], "need": ["ppo_cmdp_state"],
+        "extra": ["--state-cost-barrier-form", "distance"],
+        "what": "CMDP: HOCBF state cost as a constraint, filter OFF in training",
+    },
+    "C2_cmdp_action": {
+        "variants": ["ppo_cmdp_action"], "need": ["ppo_cmdp_action"],
+        "extra": [],
+        "what": "CMDP: HOCBF action-distance cost as a constraint, filter OFF",
+    },
 }
+
+# Arms that require --cost-limit to be supplied through --extra-arg.
+CMDP_ARMS = ("C1_cmdp_state", "C2_cmdp_action")
 
 
 def log(message: str, log_path: Path) -> None:
@@ -320,10 +343,29 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit.")
     args = parser.parse_args()
 
-    labels = list(ARMS) if args.only is None else [l for l in args.only if l in ARMS]
+    # The CMDP arms are opt-in: they require a --cost-limit that has no
+    # defensible default, so including them in the bare invocation would turn
+    # a previously working command into an error.
+    labels = (
+        [l for l in ARMS if l not in CMDP_ARMS]
+        if args.only is None
+        else [l for l in args.only if l in ARMS]
+    )
     unknown = [] if args.only is None else [l for l in args.only if l not in ARMS]
     if unknown:
         parser.error(f"unknown arm(s): {unknown}. Known: {list(ARMS)}")
+
+    # Fail before any training rather than letting every run die seconds in.
+    requested_cmdp = [l for l in labels if l in CMDP_ARMS]
+    if requested_cmdp and not any(
+        str(a).startswith("--cost-limit") for a in args.extra_args
+    ):
+        parser.error(
+            f"{requested_cmdp} need a constraint budget: pass it with "
+            "--extra-arg=--cost-limit --extra-arg <d>. It has no default and "
+            "must come from measured cost distributions; see "
+            "docs/cmdp_implementation_notes.md."
+        )
 
     out_base: Path = args.out_base
     out_base.mkdir(parents=True, exist_ok=True)
