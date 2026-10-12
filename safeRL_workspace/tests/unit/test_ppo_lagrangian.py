@@ -195,6 +195,39 @@ def test_cost_critic_is_in_the_optimizer():
     assert all(id(p) in optimized for p in model.policy.cost_critic.parameters())
 
 
+def test_cost_critic_is_grouped_with_the_value_parameters():
+    """The cost critic must not be clipped together with the actor.
+
+    The base split groups by '"value_net" in name'. The projected policy's
+    extra head is called safety_value_net and matches by coincidence; this one
+    is cost_critic and would otherwise land in the policy group, so enabling
+    separate_grad_clip would scale the policy gradient by the cost critic's
+    gradient -- the opposite of the intended fix.
+    """
+
+    model = _make_model(COST_SOURCE_ACTION)
+    model.learn(total_timesteps=32)
+    policy_params, value_params = model._gradient_parameter_groups()
+    cost_ids = {id(p) for p in model.policy.cost_critic.parameters()}
+    assert cost_ids & {id(p) for p in value_params} == cost_ids
+    assert not (cost_ids & {id(p) for p in policy_params})
+
+
+def test_separate_grad_clip_leaves_the_actor_group_cost_free():
+    """With the split on, grad_norm_pi must exclude the cost critic."""
+
+    model = _make_model(COST_SOURCE_ACTION)
+    model.separate_grad_clip = True
+    model.learn(total_timesteps=32)
+    policy_params, _ = model._gradient_parameter_groups()
+    actor_names = {
+        name
+        for name, param in model.policy.named_parameters()
+        if any(param is p for p in policy_params)
+    }
+    assert not any(name.startswith("cost_critic") for name in actor_names)
+
+
 def test_cost_critic_head_is_unconstrained():
     """No softplus: the head must be able to emit negative values for GAE."""
 

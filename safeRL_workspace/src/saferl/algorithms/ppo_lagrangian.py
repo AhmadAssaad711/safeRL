@@ -359,6 +359,35 @@ class PPOLagrangian(LatentActionPPO):
             raise TypeError("PPOLagrangian requires a Box action space")
 
     # ------------------------------------------------------------------
+    # Gradient grouping
+    # ------------------------------------------------------------------
+
+    def _gradient_parameter_groups(self) -> tuple[list, list]:
+        """Split parameters into policy and value groups, cost critic included.
+
+        The base implementation groups by ``"value_net" in name``. The
+        projected policy's extra head is called ``safety_value_net`` and so
+        lands in the value group by substring coincidence; this one is called
+        ``cost_critic`` and would land in the **policy** group.
+
+        That matters specifically when ``separate_grad_clip`` is on: the cost
+        critic's gradient would then be clipped together with the actor, so a
+        large cost-regression gradient would scale the policy gradient down.
+        It would look like the shared-budget fix had been applied while making
+        the coupling worse, and ``train/grad_norm_pi`` would be mislabelled.
+        """
+
+        policy_params, value_params = [], []
+        for name, param in self.policy.named_parameters():
+            if param.grad is None:
+                continue
+            if "value_net" in name or name.startswith("cost_critic"):
+                value_params.append(param)
+            else:
+                policy_params.append(param)
+        return policy_params, value_params
+
+    # ------------------------------------------------------------------
     # Cost evaluation
     # ------------------------------------------------------------------
 
