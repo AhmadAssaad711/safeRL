@@ -267,11 +267,43 @@ the same early descent, 179.0 -> 92.6. **Whether the stabilizer prevents the
 reversal past 200k is unresolved as of this writing.** If it does not, the next
 levers are a `--dual-max` cap or a PID controller on the same error.
 
-### Open discrepancy to reconcile before publication
+### C2: the budget, not the algorithm
 
-C1 and C2 now differ in more than their cost source: C2 additionally carries
-`--cmdp-penalty-scaling`. Either apply it to both arms or neither before the
-two are compared, and record the choice.
+`--cmdp-penalty-scaling` did **not** prevent the reversal: with it, `J_C` still
+went 179.0 -> 186.4 by 375k with lambda at 30.6, the same dip-then-climb.
+
+The likelier explanation is that `d_a = 60` was **below the achievable floor**.
+The unconstrained profile measured `J_C` ~109, and the constrained run's best
+was 92.6 -- it never approached 60. The action cost has a hard component from
+infeasible states that no policy can remove, so a budget under that floor makes
+the problem infeasible, forces lambda to diverge, and the diverging lambda
+distorts the policy. That distortion *is* the reversal.
+
+Relaunched at `d_a = 95`, just under the measured unconstrained level, and
+without the penalty scaling so the two arms match again. At 175k:
+`J_C` 179.0 -> 158.8, violation 84.0 -> 63.8, lambda 6.3 and rising gently.
+Descending more slowly than the `d_a = 60` run did, as expected from the softer
+pressure. **Whether it settles below 95 is still unresolved.**
+
+Lesson worth keeping: for a cost with an exogenous floor, "50% of the
+unconstrained level" is the wrong rule for choosing `d`. Measure the floor
+first -- the cost on a policy that is already minimizing it -- and set `d`
+above that.
+
+### Status of the two final runs
+
+| | C1 CMDP-State | C2 CMDP-Action |
+|---|---|---|
+| out-base | `cmdp_final_state_ellipse` | `cmdp_final_action_d95` |
+| cost form | `ellipse` state cost | normalized `violation` |
+| `d` | 0.5 | 95 |
+| `dual_lr` | 0.05 | 0.0007 |
+| context / split clip | on / on | on / on |
+| last read | 750k: `J_C` 0.471, violation **-0.029 (satisfied)**, lambda 0.52 | 175k: `J_C` 158.8, violation 63.8, lambda 6.3 |
+| verdict | **working** | descending, unresolved |
+
+Both are 7-seed runs at concurrency 1, launched 2026-10-12 23:30 and
+2026-10-13 00:07, alongside the B2 lambda sweep.
 
 ## 5. What is NOT built, and why
 
