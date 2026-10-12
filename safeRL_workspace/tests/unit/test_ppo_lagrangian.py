@@ -93,6 +93,7 @@ def _make_env(n_envs: int = 2) -> DummyVecEnv:
 
 
 def _make_model(cost_source: str, **config_kwargs) -> PPOLagrangian:
+    action_cost_form = config_kwargs.pop("action_cost_form", "projection")
     config = CMDPConfig(
         cost_limit=config_kwargs.pop("cost_limit", 0.01),
         gamma_c=0.98,
@@ -105,6 +106,7 @@ def _make_model(cost_source: str, **config_kwargs) -> PPOLagrangian:
         _make_env(),
         cmdp_config=config,
         cost_source=cost_source,
+        action_cost_form=action_cost_form,
         state_cost_params=StateCostParameters(lambda_s=1.0, boundary_count=1),
         n_steps=16,
         batch_size=16,
@@ -364,6 +366,42 @@ def test_action_cost_grows_with_distance_outside_the_safe_set():
     # a_x <= -1, so the gaps are 1.0 and 4.0 giving 0.5 and 8.0.
     assert near_cost[0] == pytest.approx(0.5)
     assert far_cost[0] == pytest.approx(8.0)
+
+
+def test_violation_form_needs_no_projection_and_stays_graded():
+    """The reformulated action cost must order actions on a trapped state.
+
+    The synthetic env's single row is a_x <= -1, which is satisfiable, so here
+    the two forms agree; the point of the test is that the violation path runs
+    end to end through the trainer and remains action-sensitive.
+    """
+
+    model = _make_model(COST_SOURCE_ACTION, action_cost_form="violation")
+    obs = np.stack([_ContextEnv(seed=0)._observation() for _ in range(2)])
+    safe = np.array([[-2.0, 0.0], [-2.0, 0.0]], dtype=np.float32)
+    near = np.array([[0.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+    far = np.array([[3.0, 0.0], [3.0, 0.0]], dtype=np.float32)
+    assert model._action_costs(safe, obs)[0][0] == pytest.approx(0.0)
+    assert model._action_costs(near, obs)[0][0] == pytest.approx(0.5)
+    assert model._action_costs(far, obs)[0][0] == pytest.approx(8.0)
+
+
+def test_violation_form_trains_end_to_end():
+    model = _make_model(COST_SOURCE_ACTION, action_cost_form="violation", cost_limit=0.0)
+    model.learn(total_timesteps=32)
+    assert model.cmdp_training_diagnostics
+    assert model.dual.value > 0.0
+
+
+def test_unknown_action_cost_form_is_rejected():
+    with pytest.raises(ValueError, match="action_cost_form"):
+        _make_model(COST_SOURCE_ACTION, action_cost_form="hinge")
+
+
+def test_projection_remains_the_default_form():
+    """The six completed seeds used the projection form; keep it the default."""
+
+    assert _make_model(COST_SOURCE_ACTION).action_cost_form == "projection"
 
 
 def test_state_cost_reads_the_post_step_constraint_system():

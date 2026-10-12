@@ -122,8 +122,10 @@ from saferl.algorithms.ppo_lagrangian import (
     PPOLagrangian,
 )
 from saferl.safety.action_cost import (
-    SUPPORTED_INFEASIBLE_RULES,
+    ACTION_COST_FORMS,
     BOX_BOUND_RULE,
+    PROJECTION_COST_FORM,
+    SUPPORTED_INFEASIBLE_RULES,
 )
 
 
@@ -2207,6 +2209,9 @@ def build_model(
             ),
             infeasible_rule=str(
                 getattr(args, "cmdp_infeasible_rule", BOX_BOUND_RULE)
+            ),
+            action_cost_form=str(
+                getattr(args, "cmdp_action_cost_form", PROJECTION_COST_FORM)
             ),
             cost_vf_coef=float(getattr(args, "cost_vf_coef", 0.5)),
             policy_kwargs=cmdp_policy_kwargs,
@@ -4894,6 +4899,20 @@ def parse_args() -> argparse.Namespace:
             "'box_bound' is a fixed conservative constant from the action "
             "bounds; 'fallback' is solver-dependent and diagnostic only; "
             "'zero' is hazardous and exists for parity experiments."
+        ),
+    )
+    parser.add_argument(
+        "--cmdp-action-cost-form",
+        choices=sorted(ACTION_COST_FORMS),
+        default=PROJECTION_COST_FORM,
+        help=(
+            "How the action cost is defined. 'projection' is 1/2 d^2(a, "
+            "U_safe) with a fixed constant where the safe set is empty; that "
+            "constant is identical for every action, and measured at 51%% of "
+            "samples it left the cost critic with explained variance 0.0000. "
+            "'violation' is 1/2 sum_i [(A_i a - b_i)_+]^2 everywhere: no "
+            "special case, no solver, and still graded in the action on a "
+            "trapped state."
         ),
     )
     parser.add_argument(

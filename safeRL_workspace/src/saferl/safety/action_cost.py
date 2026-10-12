@@ -205,6 +205,118 @@ def action_distance_cost(
     return cost.astype(np.float64, copy=False), diagnostics
 
 
+def constraint_violation_cost(
+    actions: Any,
+    rows: Any,
+    bounds: Any,
+    mask: Any,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return ``c_a`` as the action's squared HOCBF constraint violation::
+
+        c_a(s, a) = 1/2 * sum_i [ ( A_i(s) a - b_i(s) )_+ / ||A_i(s)|| ]^2
+
+    over the active rows of ``A(s) u <= b(s)``.
+
+    **Each row is normalized by its own norm, and that is not cosmetic.**
+    ``(A_i, b_i)`` and ``(k A_i, k b_i)`` describe the *same* halfspace, so the
+    cost must not change between them; without the division it changes by
+    ``k^2``. The HOCBF rows carry no canonical scale, and measured on this
+    environment the unnormalized form gave a mean cost of ~354 with a per-row
+    violation of ~12.6, a cost-critic loss of 2.3e8 and an explained variance
+    of exactly 0.0000 -- an unpredictable target produced by the units, not by
+    the dynamics. Dividing by ``||A_i||`` makes each term the Euclidean
+    distance from the action to that halfspace, in physical action units
+    (m/s^2), which is also what makes the single-active-constraint case equal
+    the projection distance exactly.
+
+    This is the reformulation that removes the projection form's degenerate
+    branch. Where ``1/2 d^2(a, U_safe(s))`` needs an invented constant on an
+    empty safe set -- a value that is identical for every action and so carries
+    no gradient at all -- this is defined by the same formula everywhere:
+
+    * it is zero exactly on ``U_safe(s)``, so it is still "incompatible with
+      safety" and not a per-step tax in safe states;
+    * it stays graded in the action when the safe set is empty. A trapped state
+      has a positive *floor* equal to the smallest violation any action can
+      achieve, but the action still moves the cost above that floor, so
+      ``d c_a / d a`` is non-zero everywhere;
+    * that floor is a continuous measure of how deeply trapped the state is,
+      and it vanishes continuously as the safe set stops being empty -- no
+      0 -> 36 jump at the feasibility boundary;
+    * it needs no solver, only a matrix-vector product and a hinge.
+
+    It is a different *metric* from the projection distance: both vanish
+    exactly on ``U_safe(s)``, and the two agree up to scale when a single
+    constraint is active, but they differ once several are. That matters only
+    where the quantity has to match the detached actor loss, which regresses
+    against the projection; see ``ACTION_COST_FORMS``.
+
+    ``rows`` is ``(batch, max_constraints, 2)``, ``bounds`` and ``mask`` are
+    ``(batch, max_constraints)``, exactly as ``split_cbf_context_numpy``
+    returns them. Inactive rows are masked out rather than assumed zero.
+    """
+
+    action_array = _as_2d(actions, name="actions")
+    row_array = np.asarray(rows, dtype=float)
+    bound_array = np.asarray(bounds, dtype=float)
+    mask_array = np.asarray(mask, dtype=float)
+    if row_array.ndim != 3 or row_array.shape[0] != action_array.shape[0]:
+        raise ValueError(
+            "rows must be (batch, max_constraints, action_dim) matching actions"
+        )
+    if bound_array.shape != row_array.shape[:2]:
+        raise ValueError("bounds must be (batch, max_constraints)")
+    if mask_array.shape != row_array.shape[:2]:
+        raise ValueError("mask must be (batch, max_constraints)")
+
+    # (batch, max_constraints): A_i . a - b_i for every row.
+    residual = np.einsum("bca,ba->bc", row_array, action_array) - bound_array
+    # Normalize by the row norm so the term is a distance in action units and
+    # is invariant to rescaling a row. A zero row constrains nothing; guard the
+    # division and let the mask drop it.
+    row_norm = np.linalg.norm(row_array, axis=2)
+    degenerate = row_norm <= 1e-12
+    active = (mask_array > 0.5) & ~degenerate
+    scaled = residual / np.where(degenerate, 1.0, row_norm)
+    violation = np.where(active, np.maximum(scaled, 0.0), 0.0)
+    cost = 0.5 * np.square(violation).sum(axis=1)
+
+    if not np.all(np.isfinite(cost)):
+        raise ValueError("constraint-violation cost produced a non-finite value")
+
+    violated_rows = (violation > 0.0).sum(axis=1)
+    active_rows = active.sum(axis=1)
+    diagnostics = {
+        "cost_mean": float(cost.mean()) if cost.size else 0.0,
+        "cost_max": float(cost.max()) if cost.size else 0.0,
+        "active_fraction": float((cost > 0.0).mean()) if cost.size else 0.0,
+        "violated_rows_mean": (
+            float(violated_rows.mean()) if violated_rows.size else 0.0
+        ),
+        "active_rows_mean": float(active_rows.mean()) if active_rows.size else 0.0,
+        "max_row_violation_mean": (
+            float(violation.max(axis=1).mean()) if violation.size else 0.0
+        ),
+        "sample_count": int(action_array.shape[0]),
+    }
+    return cost.astype(np.float64, copy=False), diagnostics
+
+
+# How the action cost is defined.
+#
+# "projection" 1/2 d^2(a, U_safe(s)) with a fixed constant on an empty safe
+#              set. The original form. Matches what the detached actor loss
+#              regresses against, but its infeasible branch is constant in the
+#              action and therefore carries no gradient -- measured at 51% of
+#              samples and 98% of the cost mass, with a cost critic explained
+#              variance of 0.0000 across six seeds.
+# "violation"  1/2 sum_i [(A_i a - b_i)_+]^2 everywhere. Graded in the action
+#              on every state, no special case, no solver.
+PROJECTION_COST_FORM = "projection"
+VIOLATION_COST_FORM = "violation"
+ACTION_COST_FORMS = (PROJECTION_COST_FORM, VIOLATION_COST_FORM)
+
+
 def action_cost_scale_from_reference(reference_correction_norm: float) -> float:
     """Return the ``c_a`` a given correction norm produces.
 

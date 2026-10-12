@@ -53,7 +53,14 @@ from saferl.algorithms.cmdp import (
     cost_gae,
     cost_objective_estimate,
 )
-from saferl.safety.action_cost import BOX_BOUND_RULE, action_distance_cost
+from saferl.safety.action_cost import (
+    ACTION_COST_FORMS,
+    BOX_BOUND_RULE,
+    PROJECTION_COST_FORM,
+    VIOLATION_COST_FORM,
+    action_distance_cost,
+    constraint_violation_cost,
+)
 from saferl.safety.state_cost import StateCostParameters, barrier_state_cost
 
 COST_SOURCE_STATE = "state"
@@ -284,6 +291,7 @@ class PPOLagrangian(LatentActionPPO):
         cost_source: str = COST_SOURCE_ACTION,
         state_cost_params: Optional[StateCostParameters] = None,
         infeasible_rule: str = BOX_BOUND_RULE,
+        action_cost_form: str = PROJECTION_COST_FORM,
         cost_vf_coef: float = 0.5,
         **kwargs: Any,
     ) -> None:
@@ -309,6 +317,11 @@ class PPOLagrangian(LatentActionPPO):
             raise TypeError("cmdp_config must be a CMDPConfig")
         self.cmdp_config = cmdp_config
         self.infeasible_rule = str(infeasible_rule)
+        self.action_cost_form = str(action_cost_form).strip().lower()
+        if self.action_cost_form not in ACTION_COST_FORMS:
+            raise ValueError(
+                f"action_cost_form must be one of {ACTION_COST_FORMS}"
+            )
         self.cost_vf_coef = float(cost_vf_coef)
         # lambda_s plays no part here: the trainer uses the raw cost and the
         # environment's own reward penalty must stay off.
@@ -403,6 +416,11 @@ class PPOLagrangian(LatentActionPPO):
         _, rows, bounds, mask = split_cbf_context_numpy(
             np.asarray(observations, dtype=np.float32), layout=self.cbf_layout
         )
+        if self.action_cost_form == VIOLATION_COST_FORM:
+            # No projection at all: the squared constraint violation is defined
+            # by the same formula on feasible and infeasible states, so there
+            # is no actionless branch and no solver call.
+            return constraint_violation_cost(box_clipped, rows, bounds, mask)
         low = np.asarray(self.action_space.low, dtype=np.float32)
         high = np.asarray(self.action_space.high, dtype=np.float32)
         safe = np.empty_like(box_clipped)
