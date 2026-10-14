@@ -12,6 +12,7 @@ from saferl.safety.state_cost import (
     VEHICLE_CLASS,
     StateCostParameters,
     barrier_state_cost,
+    barrier_violation_cost,
     state_cost_parameters_from_mapping,
 )
 
@@ -169,3 +170,81 @@ def test_round_trip_through_a_flat_mapping():
     restored = state_cost_parameters_from_mapping(PARAMS.as_dict())
     assert restored == PARAMS
 
+
+
+# --------------------------------------------------------------------------
+# HOCBF violation indicator: psi_1 >= 0 is forward invariance, so this cost
+# has CBF semantics the margin-hinged cost does not.
+# --------------------------------------------------------------------------
+
+
+def _viol(h, h_dot, params=PARAMS):
+    return barrier_violation_cost(np.asarray(h), np.asarray(h_dot), params)
+
+
+def test_violation_cost_is_zero_when_every_barrier_satisfies_psi1():
+    """psi_1 >= 0 on all barriers is the safe case and must cost nothing."""
+
+    # psi1 = h_dot + 2*h, so these are 20.0, 12.0, 12.0: all >= 0.
+    cost, diag = _viol([10.0, 6.0, 6.0], [0.0, 0.0, 0.0])
+    assert cost == 0.0
+    assert diag["violated_barriers"] == 0
+    assert diag["min_psi1"] > 0.0
+
+
+def test_violation_cost_is_one_when_any_barrier_violates():
+    """A single violated barrier is enough: the safe set is left."""
+
+    # Third barrier: psi1 = -5 + 2*1 = -3 < 0.
+    cost, diag = _viol([10.0, 6.0, 1.0], [0.0, 0.0, -5.0])
+    assert cost == 1.0
+    assert diag["violated_barriers"] == 1
+    assert diag["min_psi1"] == pytest.approx(-3.0)
+
+
+def test_violation_cost_is_an_indicator_not_a_magnitude():
+    """Deeper violation must not cost more; the budget is a rate of steps."""
+
+    mild, _ = _viol([1.0, 6.0, 6.0], [-2.1, 0.0, 0.0])
+    severe, _ = _viol([1.0, 6.0, 6.0], [-99.0, 0.0, 0.0])
+    assert mild == 1.0
+    assert severe == 1.0
+
+
+def test_violation_cost_has_no_margin_parameters_in_play():
+    """Unlike the hinged cost, margins and scales must not change it.
+
+    This is the property that makes the budget defensible: there is nothing
+    hand-fitted between the barrier condition and the cost.
+    """
+
+    h, h_dot = [1.0, 6.0, 6.0], [-3.0, 0.0, 0.0]
+    base, _ = _viol(h, h_dot)
+    wide = StateCostParameters(
+        lambda_s=1.0, delta_h=(99.0, 99.0), sigma_h=(99.0, 99.0),
+        delta_psi1=(99.0, 99.0), sigma_psi1=(99.0, 99.0),
+        psi1_gain=2.0, boundary_count=2,
+    )
+    moved, _ = barrier_violation_cost(np.asarray(h), np.asarray(h_dot), wide)
+    assert moved == base
+    # The hinged cost, by contrast, is strongly margin-dependent.
+    hinged_base, _ = barrier_state_cost(np.asarray(h), np.asarray(h_dot), PARAMS)
+    hinged_wide, _ = barrier_state_cost(np.asarray(h), np.asarray(h_dot), wide)
+    assert hinged_wide != pytest.approx(hinged_base)
+
+
+def test_violation_cost_requires_h_dot_per_barrier():
+    with pytest.raises(ValueError, match="one h_dot per barrier"):
+        _viol([1.0, 2.0, 3.0], [0.0])
+
+
+def test_violation_cost_rejects_an_empty_barrier_set():
+    with pytest.raises(ValueError, match="at least one barrier"):
+        _viol([], [])
+
+
+def test_violation_cost_reports_the_worst_barrier_and_its_class():
+    cost, diag = _viol([6.0, 6.0, 1.0], [0.0, 0.0, -5.0])
+    assert cost == 1.0
+    assert diag["argmax_class"] == BOUNDARY_CLASS
+    assert diag["violated_fraction"] == pytest.approx(1.0 / 3.0)

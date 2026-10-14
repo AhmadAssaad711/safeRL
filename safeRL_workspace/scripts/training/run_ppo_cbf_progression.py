@@ -118,6 +118,8 @@ from saferl.safety.state_cost import (
 )
 from saferl.algorithms.cmdp import CMDPConfig, SUPPORTED_COST_ESTIMATORS
 from saferl.algorithms.ppo_lagrangian import (
+    MARGIN_HINGE_STATE_COST,
+    STATE_COST_FORMS,
     CMDPActorCriticPolicy,
     PPOLagrangian,
 )
@@ -2212,6 +2214,9 @@ def build_model(
             ),
             action_cost_form=str(
                 getattr(args, "cmdp_action_cost_form", PROJECTION_COST_FORM)
+            ),
+            state_cost_form=str(
+                getattr(args, "cmdp_state_cost_form", MARGIN_HINGE_STATE_COST)
             ),
             cost_vf_coef=float(getattr(args, "cost_vf_coef", 0.5)),
             policy_kwargs=cmdp_policy_kwargs,
@@ -4913,6 +4918,19 @@ def parse_args() -> argparse.Namespace:
             "'violation' is 1/2 sum_i [(A_i a - b_i)_+]^2 everywhere: no "
             "special case, no solver, and still graded in the action on a "
             "trapped state."
+        ),
+    )
+    parser.add_argument(
+        "--cmdp-state-cost-form",
+        choices=sorted(STATE_COST_FORMS),
+        default=MARGIN_HINGE_STATE_COST,
+        help=(
+            "How the CMDP state cost is defined. 'margin_hinge' is the "
+            "max-of-hinged-squares cost, which fires on technically safe "
+            "states near the margin; measured floor ~0.49 and tightening its "
+            "budget made collisions WORSE (corr = -0.968). 'psi1_violation' "
+            "is 1{min psi_1 < 0}, i.e. exactly the forward-invariance "
+            "condition, with no free parameters and d a fraction of steps."
         ),
     )
     parser.add_argument(

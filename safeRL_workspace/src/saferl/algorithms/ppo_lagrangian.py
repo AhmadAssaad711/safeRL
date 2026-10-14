@@ -61,7 +61,26 @@ from saferl.safety.action_cost import (
     action_distance_cost,
     constraint_violation_cost,
 )
-from saferl.safety.state_cost import StateCostParameters, barrier_state_cost
+from saferl.safety.state_cost import (
+    StateCostParameters,
+    barrier_state_cost,
+    barrier_violation_cost,
+)
+
+# How the state cost is defined.
+#
+# "margin_hinge"    max_i of the margin-hinged h / psi_1 squares. Fires on
+#                   technically safe states near the margin, so it is largely a
+#                   traffic-proximity measure: measured floor ~0.49 and
+#                   corr(d, collisions) = -0.968, i.e. tightening the budget
+#                   made collisions worse.
+# "psi1_violation"  1{min_i psi_1 < 0}. Exactly the forward-invariance
+#                   condition, zero free parameters, and d is a fraction of
+#                   steps. The violation rate also separated collision from
+#                   collision-free episodes at AUC 0.875-0.999.
+MARGIN_HINGE_STATE_COST = "margin_hinge"
+PSI1_VIOLATION_STATE_COST = "psi1_violation"
+STATE_COST_FORMS = (MARGIN_HINGE_STATE_COST, PSI1_VIOLATION_STATE_COST)
 
 COST_SOURCE_STATE = "state"
 COST_SOURCE_ACTION = "action"
@@ -292,6 +311,7 @@ class PPOLagrangian(LatentActionPPO):
         state_cost_params: Optional[StateCostParameters] = None,
         infeasible_rule: str = BOX_BOUND_RULE,
         action_cost_form: str = PROJECTION_COST_FORM,
+        state_cost_form: str = MARGIN_HINGE_STATE_COST,
         cost_vf_coef: float = 0.5,
         **kwargs: Any,
     ) -> None:
@@ -321,6 +341,11 @@ class PPOLagrangian(LatentActionPPO):
         if self.action_cost_form not in ACTION_COST_FORMS:
             raise ValueError(
                 f"action_cost_form must be one of {ACTION_COST_FORMS}"
+            )
+        self.state_cost_form = str(state_cost_form).strip().lower()
+        if self.state_cost_form not in STATE_COST_FORMS:
+            raise ValueError(
+                f"state_cost_form must be one of {STATE_COST_FORMS}"
             )
         self.cost_vf_coef = float(cost_vf_coef)
         # lambda_s plays no part here: the trainer uses the raw cost and the
@@ -456,6 +481,12 @@ class PPOLagrangian(LatentActionPPO):
         systems = env.env_method("current_constraint_system")
         costs = np.zeros(len(systems), dtype=np.float64)
         argmax_boundary = 0
+        min_psi1: list[float] = []
+        scorer = (
+            barrier_violation_cost
+            if self.state_cost_form == PSI1_VIOLATION_STATE_COST
+            else barrier_state_cost
+        )
         for index, system in enumerate(systems):
             h = np.asarray(system.get("barrier_h", ()), dtype=float)
             h_dot = np.asarray(system.get("barrier_h_dot", ()), dtype=float)
@@ -465,18 +496,25 @@ class PPOLagrangian(LatentActionPPO):
                     "CMDP-State requires per-barrier h_dot from "
                     "batch_pairwise_hocbf_constraints"
                 )
-            cost, diagnostics = barrier_state_cost(h, h_dot, self.state_cost_params)
+            cost, diagnostics = scorer(h, h_dot, self.state_cost_params)
             costs[index] = cost
             argmax_boundary += int(diagnostics["argmax_class"] == "boundary")
-        return costs, {
+            if "min_psi1" in diagnostics:
+                min_psi1.append(float(diagnostics["min_psi1"]))
+        out = {
             "cost_mean": float(costs.mean()) if costs.size else 0.0,
             "cost_max": float(costs.max()) if costs.size else 0.0,
+            # Under the psi1-violation form this IS the violation rate, i.e.
+            # the quantity the constraint budgets.
             "active_fraction": float((costs > 0.0).mean()) if costs.size else 0.0,
             "boundary_argmax_fraction": (
                 float(argmax_boundary) / float(len(systems)) if systems else 0.0
             ),
             "sample_count": int(len(systems)),
         }
+        if min_psi1:
+            out["min_psi1_mean"] = float(np.mean(min_psi1))
+        return costs, out
 
     # ------------------------------------------------------------------
     # Rollout collection
