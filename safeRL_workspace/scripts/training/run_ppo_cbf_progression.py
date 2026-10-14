@@ -2190,6 +2190,8 @@ def build_model(
             "cost_critic_sees_context": bool(
                 getattr(args, "cost_critic_sees_context", False)
             ),
+            "sigma_min": getattr(args, "cmdp_sigma_min", None),
+            "sigma_max": getattr(args, "cmdp_sigma_max", None),
         }
         return PPOLagrangian(
             CMDPActorCriticPolicy,
@@ -4918,6 +4920,29 @@ def parse_args() -> argparse.Namespace:
             "'violation' is 1/2 sum_i [(A_i a - b_i)_+]^2 everywhere: no "
             "special case, no solver, and still graded in the action on a "
             "trapped state."
+        ),
+    )
+    parser.add_argument(
+        "--cmdp-sigma-min",
+        type=float,
+        default=None,
+        help=(
+            "Lower bound on the policy's exploration scale for the CMDP arms. "
+            "SB3 leaves log_std unbounded, and a Lagrangian penalty on a state "
+            "cost rewards shrinking sigma -- less exploration means fewer "
+            "excursions into costly states. Measured on three independent cost "
+            "definitions, lambda growth drove sigma to 0.087 and the policy "
+            "locked into a poor deterministic behaviour. Unset leaves it free."
+        ),
+    )
+    parser.add_argument(
+        "--cmdp-sigma-max",
+        type=float,
+        default=None,
+        help=(
+            "Upper bound on the exploration scale. The action-cost arm failed "
+            "the other way: its cost advantage was noise, the entropy bonus "
+            "won, and sigma diverged to 94 on a [-3, 3] action box."
         ),
     )
     parser.add_argument(

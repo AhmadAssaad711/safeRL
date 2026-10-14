@@ -458,3 +458,74 @@ def test_model_loads_without_an_environment(tmp_path):
     restored = PPOLagrangian.load(str(path), device="cpu")
     assert restored.cost_source == COST_SOURCE_ACTION
     assert restored.cmdp_config == model.cmdp_config
+
+
+# --------------------------------------------------------------------------
+# Exploration-scale bounds. SB3 leaves log_std unbounded, and three
+# independent cost definitions each ended in a sigma pathology: collapse to
+# 0.087 under a state cost, divergence to 94 under a noisy action cost.
+# --------------------------------------------------------------------------
+
+
+def test_sigma_bounds_constrain_the_distribution():
+    model = _make_model(COST_SOURCE_ACTION)
+    model.policy.sigma_min = 0.3
+    model.policy.sigma_max = 2.0
+    with th.no_grad():
+        model.policy.log_std.fill_(-9.0)          # sigma ~ 0.0001
+    assert float(th.exp(model.policy.bounded_log_std()).min()) == pytest.approx(0.3)
+    with th.no_grad():
+        model.policy.log_std.fill_(9.0)           # sigma ~ 8100
+    assert float(th.exp(model.policy.bounded_log_std()).max()) == pytest.approx(2.0)
+
+
+def test_clamp_writes_the_bound_back_into_the_parameter():
+    """The use-time clamp alone lets the raw parameter drift on Adam momentum."""
+
+    model = _make_model(COST_SOURCE_ACTION)
+    model.policy.sigma_min = 0.3
+    with th.no_grad():
+        model.policy.log_std.fill_(-9.0)
+    model.policy.clamp_log_std_()
+    assert float(th.exp(model.policy.log_std.detach()).min()) == pytest.approx(0.3)
+
+
+def test_sigma_bounds_are_off_by_default():
+    """Completed arms ran unbounded; keep that the documented default."""
+
+    model = _make_model(COST_SOURCE_ACTION)
+    assert model.policy.sigma_min is None
+    assert model.policy.sigma_max is None
+
+
+def test_inverted_sigma_bounds_are_rejected():
+    with pytest.raises(ValueError, match="sigma_min must be below"):
+        PPOLagrangian(
+            CMDPActorCriticPolicy, _make_env(),
+            cmdp_config=CMDPConfig(cost_limit=0.1),
+            n_steps=16, batch_size=16, device="cpu",
+            cbf_base_observation_dim=BASE_DIM, cbf_max_constraints=MAX_CONSTRAINTS,
+            policy_kwargs={"cbf_base_observation_dim": BASE_DIM,
+                           "sigma_min": 2.0, "sigma_max": 0.5},
+        )
+
+
+def test_sigma_is_held_inside_the_band_through_training():
+    """The bound must survive the optimizer, not just the forward pass."""
+
+    model = PPOLagrangian(
+        CMDPActorCriticPolicy, _make_env(),
+        cmdp_config=CMDPConfig(cost_limit=0.0, dual_lr=1.0),
+        cost_source=COST_SOURCE_ACTION,
+        n_steps=16, batch_size=16, n_epochs=2, seed=307, device="cpu",
+        cbf_base_observation_dim=BASE_DIM, cbf_max_constraints=MAX_CONSTRAINTS,
+        policy_kwargs={"cbf_base_observation_dim": BASE_DIM,
+                       "cost_critic_arch": [16, 16],
+                       "net_arch": {"pi": [16], "vf": [16]},
+                       "sigma_min": 0.4, "sigma_max": 1.5},
+    )
+    model.learn(total_timesteps=64)
+    sig = th.exp(model.policy.log_std.detach())
+    assert float(sig.min()) >= 0.4 - 1e-6
+    assert float(sig.max()) <= 1.5 + 1e-6
+    assert "sigma_mean" in model.cmdp_training_diagnostics[-1]

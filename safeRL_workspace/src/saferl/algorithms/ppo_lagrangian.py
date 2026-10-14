@@ -248,6 +248,8 @@ class CMDPActorCriticPolicy(ActorCriticPolicy):
         cbf_base_observation_dim: int = 42,
         cost_critic_arch: Optional[list[int]] = None,
         cost_critic_sees_context: bool = False,
+        sigma_min: Optional[float] = None,
+        sigma_max: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
         self.cbf_base_observation_dim = int(cbf_base_observation_dim)
@@ -255,6 +257,26 @@ class CMDPActorCriticPolicy(ActorCriticPolicy):
         self._cost_critic_arch = (
             [256, 128] if cost_critic_arch is None else list(cost_critic_arch)
         )
+        # Bounds on the exploration scale. SB3 leaves log_std unbounded, and
+        # measured on three independent cost definitions that is enough to end
+        # the run: a Lagrangian penalty on a STATE cost rewards shrinking sigma
+        # (less exploration means fewer excursions into costly states), so
+        # lambda growth drove sigma to 0.087 and the policy locked into a poor
+        # deterministic behaviour before it could satisfy the budget legitimately.
+        # The action cost failed the other way -- its advantage was noise, so the
+        # entropy bonus won and sigma diverged to 94 on a +/-3 action box.
+        self.sigma_min = None if sigma_min is None else float(sigma_min)
+        self.sigma_max = None if sigma_max is None else float(sigma_max)
+        if (
+            self.sigma_min is not None
+            and self.sigma_max is not None
+            and self.sigma_min >= self.sigma_max
+        ):
+            raise ValueError("sigma_min must be below sigma_max")
+        for name in ("sigma_min", "sigma_max"):
+            v = getattr(self, name)
+            if v is not None and (not np.isfinite(v) or v <= 0.0):
+                raise ValueError(f"{name} must be finite and positive")
         super().__init__(*args, **kwargs)
 
     def _build(self, lr_schedule: Any) -> None:
@@ -283,6 +305,42 @@ class CMDPActorCriticPolicy(ActorCriticPolicy):
         # The base class builds its optimizer before this network exists.
         self.optimizer = self.optimizer_class(
             self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs
+        )
+
+    def bounded_log_std(self) -> th.Tensor:
+        """``log_std`` clamped to the configured sigma band.
+
+        Clamping at use rather than reparameterizing keeps the parameter's
+        meaning and checkpoint layout unchanged. The clamp also zeroes the
+        gradient outside the band, so the optimizer stops pushing against it.
+        """
+
+        log_std = self.log_std
+        if self.sigma_min is not None:
+            log_std = th.clamp(log_std, min=float(np.log(self.sigma_min)))
+        if self.sigma_max is not None:
+            log_std = th.clamp(log_std, max=float(np.log(self.sigma_max)))
+        return log_std
+
+    def clamp_log_std_(self) -> None:
+        """Clamp the stored parameter, called after each optimizer step.
+
+        The use-time clamp alone leaves the raw parameter free to drift far
+        outside the band on Adam momentum, which would make the bound invisible
+        in the checkpoint and slow to release if it were ever widened.
+        """
+
+        if self.sigma_min is None and self.sigma_max is None:
+            return
+        with th.no_grad():
+            lo = None if self.sigma_min is None else float(np.log(self.sigma_min))
+            hi = None if self.sigma_max is None else float(np.log(self.sigma_max))
+            self.log_std.clamp_(min=lo, max=hi)
+
+    def _get_action_dist_from_latent(self, latent_pi: th.Tensor):  # type: ignore[override]
+        mean_actions = self.action_net(latent_pi)
+        return self.action_dist.proba_distribution(
+            mean_actions, self.bounded_log_std()
         )
 
     def _cost_critic_input(self, obs: th.Tensor) -> th.Tensor:
@@ -773,6 +831,7 @@ class PPOLagrangian(LatentActionPPO):
                 loss.backward()
                 self._clip_and_log_gradients()
                 self.policy.optimizer.step()
+                self.policy.clamp_log_std_()
 
             self._n_updates += 1
             if not continue_training:
@@ -804,6 +863,14 @@ class PPOLagrangian(LatentActionPPO):
             "explained_variance": float(explained),
             "cost_explained_variance": float(cost_explained),
             "cost_mean_raw": buffer.mean_raw_cost(),
+            # Logged every run: sigma collapse and sigma divergence were both
+            # invisible until read out of a checkpoint by hand.
+            "sigma_mean": float(
+                th.exp(self.policy.bounded_log_std().detach()).mean().cpu().item()
+            ),
+            "sigma_min_component": float(
+                th.exp(self.policy.bounded_log_std().detach()).min().cpu().item()
+            ),
             **dual_info,
             **{
                 f"cmdp/rollout_{key}": value
