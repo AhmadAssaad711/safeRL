@@ -45,7 +45,11 @@ from stable_baselines3.common.utils import explained_variance, obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
 from scripts.common.cbf_projection import project_polytope_2d_numpy
-from scripts.common.projected_ppo_cbf import LatentActionPPO, split_cbf_context_numpy
+from scripts.common.projected_ppo_cbf import (
+    CBFBaseFeaturesExtractor,
+    LatentActionPPO,
+    split_cbf_context_numpy,
+)
 
 from saferl.algorithms.cmdp import (
     CMDPConfig,
@@ -277,6 +281,31 @@ class CMDPActorCriticPolicy(ActorCriticPolicy):
             v = getattr(self, name)
             if v is not None and (not np.isfinite(v) or v <= 0.0):
                 raise ValueError(f"{name} must be finite and positive")
+
+        # Strip the CBF context from the ACTOR and the REWARD CRITIC, so they
+        # see the same base observation as every arm the CMDP is compared
+        # against: A1 via context_ignoring_policy_kwargs and the projected
+        # arms via this same extractor.
+        #
+        # Without this the default FlattenExtractor hands the actor all 113
+        # dimensions -- 41 base features plus 72 raw constraint rows, bounds
+        # and mask, unnormalized and with magnitudes in the tens. That is both
+        # an invalid comparison and a plausible cause of degraded learning in
+        # its own right. The cost critic is unaffected: it takes the raw
+        # observation directly and applies its own cost_critic_sees_context
+        # slicing, so it can still be granted the context deliberately.
+        extractor_class = kwargs.pop(
+            "features_extractor_class", CBFBaseFeaturesExtractor
+        )
+        if extractor_class is not CBFBaseFeaturesExtractor:
+            raise ValueError(
+                "the CMDP policy requires CBFBaseFeaturesExtractor so the "
+                "actor cannot silently read the CBF context"
+            )
+        extractor_kwargs = dict(kwargs.pop("features_extractor_kwargs", {}) or {})
+        extractor_kwargs["base_observation_dim"] = self.cbf_base_observation_dim
+        kwargs["features_extractor_class"] = CBFBaseFeaturesExtractor
+        kwargs["features_extractor_kwargs"] = extractor_kwargs
         super().__init__(*args, **kwargs)
 
     def _build(self, lr_schedule: Any) -> None:

@@ -529,3 +529,60 @@ def test_sigma_is_held_inside_the_band_through_training():
     assert float(sig.min()) >= 0.4 - 1e-6
     assert float(sig.max()) <= 1.5 + 1e-6
     assert "sigma_mean" in model.cmdp_training_diagnostics[-1]
+
+
+def test_actor_cannot_see_the_cbf_context():
+    """The actor must read the base observation only.
+
+    Every arm the CMDP is compared against -- A1 via
+    context_ignoring_policy_kwargs, the projected arms via
+    CBFBaseFeaturesExtractor -- sees only the base features. A plain
+    ActorCriticPolicy defaults to FlattenExtractor and hands the actor the
+    full augmented observation instead: 113 dims rather than 41 on the real
+    environment, including raw constraint rows and bounds with magnitudes in
+    the tens. That is an invalid comparison and a plausible cause of degraded
+    learning on its own, and it went unnoticed through three cost
+    definitions, a budget sweep and a sigma floor.
+    """
+
+    model = _make_model(COST_SOURCE_ACTION)
+    assert model.policy.features_extractor.features_dim == BASE_DIM
+    first = [
+        m for m in model.policy.mlp_extractor.policy_net.modules()
+        if isinstance(m, th.nn.Linear)
+    ][0]
+    assert first.in_features == BASE_DIM, (
+        f"actor reads {first.in_features} dims, expected {BASE_DIM}"
+    )
+
+
+def test_cost_critic_can_still_be_granted_the_context():
+    """Stripping the actor's context must not disable the cost critic's."""
+
+    model = PPOLagrangian(
+        CMDPActorCriticPolicy, _make_env(),
+        cmdp_config=CMDPConfig(cost_limit=0.1),
+        n_steps=16, batch_size=16, device="cpu",
+        cbf_base_observation_dim=BASE_DIM, cbf_max_constraints=MAX_CONSTRAINTS,
+        policy_kwargs={"cbf_base_observation_dim": BASE_DIM,
+                       "cost_critic_arch": [16, 16],
+                       "cost_critic_sees_context": True},
+    )
+    assert model.policy.features_extractor.features_dim == BASE_DIM
+    cf = [m for m in model.policy.cost_critic.modules()
+          if isinstance(m, th.nn.Linear)][0]
+    assert cf.in_features == OBS_DIM
+
+
+def test_a_context_leaking_extractor_is_rejected():
+    from stable_baselines3.common.torch_layers import FlattenExtractor
+
+    with pytest.raises(ValueError, match="CBFBaseFeaturesExtractor"):
+        PPOLagrangian(
+            CMDPActorCriticPolicy, _make_env(),
+            cmdp_config=CMDPConfig(cost_limit=0.1),
+            n_steps=16, batch_size=16, device="cpu",
+            cbf_base_observation_dim=BASE_DIM, cbf_max_constraints=MAX_CONSTRAINTS,
+            policy_kwargs={"cbf_base_observation_dim": BASE_DIM,
+                           "features_extractor_class": FlattenExtractor},
+        )
