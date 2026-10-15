@@ -141,10 +141,20 @@ ARMS: dict[str, dict[str, Any]] = {
         "extra": [],
         "what": "CMDP: HOCBF action-distance cost as a constraint, filter OFF",
     },
+    # Canonical constrained-RL baseline. The episodic estimator and gamma_c = 1
+    # belong to the arm rather than the caller: with termination on first
+    # collision they are what make J_C the collision probability, and the
+    # default per-step estimator would silently reinterpret d by a factor of
+    # the episode length.
+    "C0_cmdp_collision": {
+        "variants": ["ppo_cmdp_collision"], "need": ["ppo_cmdp_collision"],
+        "extra": ["--cost-estimator", "episode_sum", "--gamma-c", "1.0"],
+        "what": "CMDP: collision-indicator cost, episodic budget, filter OFF",
+    },
 }
 
 # Arms that require --cost-limit to be supplied through --extra-arg.
-CMDP_ARMS = ("C1_cmdp_state", "C2_cmdp_action")
+CMDP_ARMS = ("C1_cmdp_state", "C2_cmdp_action", "C0_cmdp_collision")
 
 
 def log(message: str, log_path: Path) -> None:
