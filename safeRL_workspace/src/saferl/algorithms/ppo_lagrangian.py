@@ -88,7 +88,22 @@ STATE_COST_FORMS = (MARGIN_HINGE_STATE_COST, PSI1_VIOLATION_STATE_COST)
 
 COST_SOURCE_STATE = "state"
 COST_SOURCE_ACTION = "action"
-SUPPORTED_COST_SOURCES = (COST_SOURCE_STATE, COST_SOURCE_ACTION)
+# The canonical constrained-RL baseline: c_t = 1{collision at t}. With the
+# episode terminating on the first collision the per-episode sum is 0 or 1, so
+# J_C = E[sum_t c_t] is the probability of a collision within the horizon and
+# d = 0.05 reads directly as "at most 5% of episodes collide".
+#
+# It is the cost a practitioner would reach for first, it is state-only so a
+# state-value cost critic is the structurally correct apparatus, and unlike
+# every HOCBF-derived cost tried here it needs no proxy-quality argument: it
+# IS the outcome of interest, so there is no gap between predicting collisions
+# and constraining them.
+COST_SOURCE_COLLISION = "collision"
+SUPPORTED_COST_SOURCES = (
+    COST_SOURCE_STATE,
+    COST_SOURCE_ACTION,
+    COST_SOURCE_COLLISION,
+)
 
 
 class CMDPRolloutBufferSamples(NamedTuple):
@@ -442,7 +457,11 @@ class PPOLagrangian(LatentActionPPO):
             if state_cost_params is None
             else state_cost_params
         )
-        if self.cost_source == COST_SOURCE_STATE and not self.state_cost_params.enabled:
+        if (
+            self.cost_source == COST_SOURCE_STATE
+            and self.state_cost_form == MARGIN_HINGE_STATE_COST
+            and not self.state_cost_params.enabled
+        ):
             raise ValueError(
                 "CMDP-State needs state_cost_params with lambda_s > 0 to enable "
                 "the cost definition; it never reaches the reward"
@@ -557,6 +576,27 @@ class PPOLagrangian(LatentActionPPO):
             action_low=low,
             action_high=high,
         )
+
+    @staticmethod
+    def _collision_costs(infos: list[dict]) -> tuple[np.ndarray, dict[str, Any]]:
+        """``c_t = 1{collision at t}`` from the environment's own report.
+
+        Read straight from the step info rather than derived from geometry, so
+        the constrained quantity is exactly the evaluated one -- there is no
+        proxy to validate.
+        """
+
+        costs = np.zeros(len(infos), dtype=np.float64)
+        for index, info in enumerate(infos):
+            hit = bool(info.get("ego_collision", False))
+            if not hit:
+                hit = int(info.get("ego_collision_events", 0) or 0) > 0
+            costs[index] = 1.0 if hit else 0.0
+        return costs, {
+            "cost_mean": float(costs.mean()) if costs.size else 0.0,
+            "active_fraction": float((costs > 0.0).mean()) if costs.size else 0.0,
+            "sample_count": int(len(infos)),
+        }
 
     def _state_costs(self, env: VecEnv) -> tuple[np.ndarray, dict[str, Any]]:
         """``c_s`` from the post-step constraint systems.
@@ -675,8 +715,12 @@ class PPOLagrangian(LatentActionPPO):
             self._update_info_buffer(infos, dones)
             n_steps += 1
 
+            # Both post-step costs: c_s is a property of s_{t+1}, and the
+            # collision indicator is reported by the step that caused it.
             if self.cost_source == COST_SOURCE_STATE:
                 costs, diagnostics = self._state_costs(env)
+            elif self.cost_source == COST_SOURCE_COLLISION:
+                costs, diagnostics = self._collision_costs(list(infos))
             cost_diagnostics.append(dict(diagnostics or {}))
 
             for idx, done in enumerate(dones):

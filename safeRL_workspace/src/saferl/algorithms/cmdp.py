@@ -67,13 +67,26 @@ import numpy as np
 # "episode_start" mean of the cost critic at episode-start states only. Closest
 #                 to the definition of ``J_C``; high variance when a rollout
 #                 holds few starts.
+# "episode_sum"   mean of the UNDISCOUNTED per-episode cost sum, i.e. total
+#                 cost divided by the number of episodes in the batch. This is
+#                 the estimator for the canonical episodic formulation
+#                 E[sum_t c_t] <= d. With a collision indicator and
+#                 termination on first collision the per-episode sum is 0 or 1,
+#                 so J_C is literally the probability of a collision within the
+#                 horizon and d = 0.05 means "at most 5% of episodes collide".
+#                 Note this is a per-EPISODE quantity: the batch_mean estimator
+#                 would instead give collisions per STEP, smaller by roughly
+#                 the episode length, and a budget written for one is
+#                 meaningless under the other.
 BATCH_MEAN_ESTIMATOR = "batch_mean"
 VALUE_MEAN_ESTIMATOR = "value_mean"
 EPISODE_START_ESTIMATOR = "episode_start"
+EPISODE_SUM_ESTIMATOR = "episode_sum"
 SUPPORTED_COST_ESTIMATORS = (
     BATCH_MEAN_ESTIMATOR,
     VALUE_MEAN_ESTIMATOR,
     EPISODE_START_ESTIMATOR,
+    EPISODE_SUM_ESTIMATOR,
 )
 
 
@@ -330,6 +343,29 @@ def cost_objective_estimate(
             raise ValueError("raw_costs must be non-empty")
         # Already a per-step average; the (1 - gamma_c) weights sum to one.
         return float(costs.mean())
+
+    if name == EPISODE_SUM_ESTIMATOR:
+        if raw_costs is None or episode_starts is None:
+            raise ValueError(
+                "the 'episode_sum' estimator requires raw_costs and "
+                "episode_starts"
+            )
+        costs = np.asarray(raw_costs, dtype=np.float64)
+        starts = np.asarray(episode_starts)
+        if starts.shape != costs.shape:
+            raise ValueError(
+                "episode_starts must match raw_costs in shape "
+                f"({starts.shape} != {costs.shape})"
+            )
+        episodes = float(np.asarray(starts, dtype=bool).sum())
+        if episodes <= 0.0:
+            raise ValueError(
+                "the 'episode_sum' estimator found no episode starts in this "
+                "batch; the rollout is shorter than one episode"
+            )
+        # Total cost per episode. No (1 - gamma_c) factor: this objective is
+        # the undiscounted episodic sum, not a renormalized discounted one.
+        return float(costs.sum() / episodes)
 
     if cost_values is None:
         raise ValueError(f"the {name!r} estimator requires cost_values")

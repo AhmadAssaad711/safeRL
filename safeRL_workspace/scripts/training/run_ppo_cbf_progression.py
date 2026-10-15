@@ -349,6 +349,22 @@ VARIANT_SPECS: dict[str, dict[str, Any]] = {
         "cmdp": True,
         "cmdp_cost_source": "state",
     },
+    # The canonical constrained-RL baseline: c_t = 1{collision}, so with
+    # termination on first collision J_C is the probability of colliding
+    # within the horizon and d reads as an allowed collision rate. No proxy,
+    # no free parameters, and it is what a practitioner would try first.
+    "ppo_cmdp_collision": {
+        "label": "CMDP with a collision-indicator cost (cost critic + dual)",
+        "level": 3,
+        "execution_mode": "box",
+        "reward_penalty": False,
+        "projected_mean": False,
+        "differentiable_actor_loss": False,
+        "detached_actor_loss": False,
+        "safety_critic": False,
+        "cmdp": True,
+        "cmdp_cost_source": "collision",
+    },
     "ppo_cmdp_action": {
         "label": "CMDP with HOCBF action-distance cost (cost critic + dual)",
         "level": 3,
@@ -501,6 +517,7 @@ TENSORBOARD_VARIANT_IDS = {
     "ppo_cbf_integrated_actor_only": "iao",
     "ppo_cmdp_state": "cmdps",
     "ppo_cmdp_action": "cmdpa",
+    "ppo_cmdp_collision": "cmdpc",
 }
 
 # Paper-facing arm letters. The differentiable-projection family is the D

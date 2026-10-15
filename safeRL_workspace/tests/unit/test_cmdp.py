@@ -1,4 +1,4 @@
-"""Contract tests for the CMDP core: cost GAE, constraint estimate, dual."""
+﻿"""Contract tests for the CMDP core: cost GAE, constraint estimate, dual."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import pytest
 
 from saferl.algorithms.cmdp import (
     BATCH_MEAN_ESTIMATOR,
+    EPISODE_SUM_ESTIMATOR,
     EPISODE_START_ESTIMATOR,
     VALUE_MEAN_ESTIMATOR,
     CMDPConfig,
@@ -343,3 +344,76 @@ def test_non_finite_cost_estimate_is_rejected():
     dual = DualVariable(CONFIG)
     with pytest.raises(ValueError, match="finite"):
         dual.update(float("nan"))
+
+
+# --------------------------------------------------------------------------
+# Episodic-sum estimator: the canonical formulation E[sum_t c_t] <= d.
+# --------------------------------------------------------------------------
+
+
+def test_episode_sum_is_cost_per_episode_not_per_step():
+    """The distinction that makes d = 0.05 mean 5% of episodes.
+
+    With a collision indicator and termination on first collision, the
+    per-episode sum is 0 or 1, so J_C is the collision probability. The
+    batch_mean estimator would instead report collisions per STEP, smaller by
+    roughly the episode length, and a budget written for one is meaningless
+    under the other.
+    """
+
+    # 20 steps, 1 env, 4 episodes, 1 collision in total.
+    costs = np.zeros((20, 1))
+    costs[7, 0] = 1.0
+    starts = np.zeros((20, 1))
+    starts[[0, 5, 10, 15], 0] = 1.0
+
+    episode_sum = cost_objective_estimate(
+        EPISODE_SUM_ESTIMATOR, gamma_c=1.0, normalize=False,
+        raw_costs=costs, episode_starts=starts,
+    )
+    batch_mean = cost_objective_estimate(
+        BATCH_MEAN_ESTIMATOR, gamma_c=1.0, normalize=False, raw_costs=costs,
+    )
+    assert episode_sum == pytest.approx(0.25)   # 1 collision / 4 episodes
+    assert batch_mean == pytest.approx(0.05)    # 1 collision / 20 steps
+    assert episode_sum != pytest.approx(batch_mean)
+
+
+def test_episode_sum_reads_as_a_collision_probability():
+    """Every episode colliding exactly once must give J_C = 1.0."""
+
+    costs = np.zeros((12, 1))
+    starts = np.zeros((12, 1))
+    for i in (0, 4, 8):
+        starts[i, 0] = 1.0
+        costs[i + 3, 0] = 1.0
+    assert cost_objective_estimate(
+        EPISODE_SUM_ESTIMATOR, gamma_c=1.0, normalize=False,
+        raw_costs=costs, episode_starts=starts,
+    ) == pytest.approx(1.0)
+
+
+def test_episode_sum_applies_no_discount_renormalization():
+    """The episodic objective is undiscounted; a (1-gamma_c) factor is wrong."""
+
+    costs = np.zeros((10, 1)); costs[2, 0] = 1.0
+    starts = np.zeros((10, 1)); starts[[0, 5], 0] = 1.0
+    for gamma in (0.9, 0.99, 1.0):
+        assert cost_objective_estimate(
+            EPISODE_SUM_ESTIMATOR, gamma_c=gamma, normalize=False,
+            raw_costs=costs, episode_starts=starts,
+        ) == pytest.approx(0.5)
+
+
+def test_episode_sum_refuses_a_batch_with_no_episode_boundary():
+    with pytest.raises(ValueError, match="no episode starts"):
+        cost_objective_estimate(
+            EPISODE_SUM_ESTIMATOR, gamma_c=1.0, normalize=False,
+            raw_costs=np.ones((4, 1)), episode_starts=np.zeros((4, 1)),
+        )
+
+
+def test_episode_sum_requires_both_inputs():
+    with pytest.raises(ValueError, match="requires raw_costs and"):
+        cost_objective_estimate(EPISODE_SUM_ESTIMATOR, gamma_c=1.0)
+
