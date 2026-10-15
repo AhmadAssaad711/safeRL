@@ -1,4 +1,4 @@
-"""PPO-Lagrangian trainer for the CMDP arms.
+﻿"""PPO-Lagrangian trainer for the CMDP arms.
 
 Solves ``max J_R  s.t.  J_C <= d`` with a separate cost critic and a dual
 variable, rather than folding safety into the reward. Two cost sources share
@@ -33,6 +33,7 @@ valid. Nothing in ``scripts/common`` is modified.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Generator, NamedTuple, Optional
 
 import numpy as np
@@ -52,6 +53,7 @@ from scripts.common.projected_ppo_cbf import (
 )
 
 from saferl.algorithms.cmdp import (
+    EPISODE_SUM_ESTIMATOR,
     CMDPConfig,
     DualVariable,
     cost_gae,
@@ -468,6 +470,17 @@ class PPOLagrangian(LatentActionPPO):
             )
         self.dual = DualVariable(cmdp_config)
         self.cmdp_training_diagnostics: list[dict[str, float]] = []
+        # Completed-episode cost totals, accumulated ACROSS rollouts.
+        #
+        # The episodic objective E[sum_t c_t] needs whole episodes, and an
+        # episode can easily outlast one rollout: with n_steps = 1000 per env
+        # and a task horizon of 3000 policy steps, a policy that stops
+        # colliding survives past the rollout window and single rollouts then
+        # contain no episode boundary at all. Deriving the estimate from one
+        # rollout's episode_starts therefore fails exactly when the constraint
+        # starts working, which is the worst possible time.
+        self._episode_cost_accumulator: Optional[np.ndarray] = None
+        self._episode_cost_history: deque[float] = deque(maxlen=200)
 
         requested = str(kwargs.get("execution_mode", "box")).strip().lower()
         if requested != "box":
@@ -736,6 +749,22 @@ class PPOLagrangian(LatentActionPPO):
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
+            # Accumulate per-episode cost totals across rollouts, banking each
+            # one as its episode ends.
+            cost_vector = np.asarray(costs, dtype=np.float64).reshape(-1)
+            if (
+                self._episode_cost_accumulator is None
+                or self._episode_cost_accumulator.shape != cost_vector.shape
+            ):
+                self._episode_cost_accumulator = np.zeros_like(cost_vector)
+            self._episode_cost_accumulator += cost_vector
+            for env_index, done in enumerate(np.asarray(dones, dtype=bool)):
+                if done:
+                    self._episode_cost_history.append(
+                        float(self._episode_cost_accumulator[env_index])
+                    )
+                    self._episode_cost_accumulator[env_index] = 0.0
+
             rollout_buffer.add(
                 self._last_obs,
                 actions,
@@ -792,15 +821,42 @@ class PPOLagrangian(LatentActionPPO):
         # updating per minibatch makes lambda chase minibatch noise. The
         # estimate is the average raw per-step cost, matching the average-cost
         # definition of J_C.
-        cost_objective = cost_objective_estimate(
-            self.cmdp_config.cost_estimator,
-            gamma_c=self.cmdp_config.gamma_c,
-            normalize=self.cmdp_config.normalize_cost_objective,
-            raw_costs=buffer.costs,
-            cost_values=buffer.cost_values,
-            episode_starts=np.asarray(buffer.episode_starts, dtype=bool),
-        )
-        dual_info = self.dual.update(cost_objective)
+        if self.cmdp_config.cost_estimator == EPISODE_SUM_ESTIMATOR:
+            # Averaged over completed episodes banked across rollouts, not over
+            # this rollout's boundaries: an episode can outlast the rollout
+            # window, and it does so precisely once the constraint starts
+            # working and the policy stops terminating early.
+            cost_objective = (
+                float(np.mean(self._episode_cost_history))
+                if self._episode_cost_history
+                else None
+            )
+        else:
+            cost_objective = cost_objective_estimate(
+                self.cmdp_config.cost_estimator,
+                gamma_c=self.cmdp_config.gamma_c,
+                normalize=self.cmdp_config.normalize_cost_objective,
+                raw_costs=buffer.costs,
+                cost_values=buffer.cost_values,
+                episode_starts=np.asarray(buffer.episode_starts, dtype=bool),
+            )
+
+        if cost_objective is None:
+            # No episode has completed yet. Hold lambda rather than inventing
+            # a constraint estimate, and carry the previous diagnostics.
+            dual_info = {
+                "cmdp/lambda": self.dual.value,
+                "cmdp/cost_objective": float("nan"),
+                "cmdp/cost_limit": float(self.cmdp_config.cost_limit),
+                "cmdp/constraint_violation": float("nan"),
+                "cmdp/penalty_scale": self.dual.penalty_scale,
+                "cmdp/episodes_banked": float(len(self._episode_cost_history)),
+            }
+        else:
+            dual_info = self.dual.update(cost_objective)
+            dual_info["cmdp/episodes_banked"] = float(
+                len(self._episode_cost_history)
+            )
         lambda_value = self.dual.value
         penalty_scale = self.dual.penalty_scale
 
@@ -973,3 +1029,4 @@ def _mean_of_dicts(records: list[dict[str, Any]]) -> dict[str, float]:
         key: float(np.mean([float(record[key]) for record in records if key in record]))
         for key in keys
     }
+

@@ -586,3 +586,87 @@ def test_a_context_leaking_extractor_is_rejected():
             policy_kwargs={"cbf_base_observation_dim": BASE_DIM,
                            "features_extractor_class": FlattenExtractor},
         )
+
+
+# --------------------------------------------------------------------------
+# Episodic cost accounting for the collision baseline.
+# --------------------------------------------------------------------------
+
+
+def _collision_env_factory(collide_at, length=8, n_envs=2):
+    class _E(_ContextEnv):
+        def step(self, action):
+            obs, r, term, trunc, info = super().step(action)
+            trunc = self._steps >= length
+            if collide_at is not None and self._steps == collide_at:
+                info["ego_collision"] = True
+                term = True
+            return obs, r, term, trunc, info
+    return DummyVecEnv([lambda i=i: _E(seed=i) for i in range(n_envs)])
+
+
+def _collision_model(env, cost_limit, dual_lr=1.0):
+    return PPOLagrangian(
+        CMDPActorCriticPolicy, env,
+        cmdp_config=CMDPConfig(
+            cost_limit=cost_limit, gamma_c=1.0, gae_lambda_c=0.95,
+            dual_lr=dual_lr, cost_estimator="episode_sum",
+        ),
+        cost_source="collision",
+        n_steps=16, batch_size=16, n_epochs=1, seed=307, device="cpu",
+        cbf_base_observation_dim=BASE_DIM, cbf_max_constraints=MAX_CONSTRAINTS,
+        policy_kwargs={"cbf_base_observation_dim": BASE_DIM,
+                       "cost_critic_arch": [16, 16],
+                       "net_arch": {"pi": [16], "vf": [16]}},
+    )
+
+
+def test_collision_cost_reads_the_environment_report():
+    model = _collision_model(_collision_env_factory(None), 0.05)
+    costs, diag = model._collision_costs(
+        [{"ego_collision": True}, {"ego_collision": False}]
+    )
+    assert list(costs) == [1.0, 0.0]
+    assert diag["active_fraction"] == pytest.approx(0.5)
+    # Falls back to the event count when the boolean is absent.
+    costs, _ = model._collision_costs([{"ego_collision_events": 2}, {}])
+    assert list(costs) == [1.0, 0.0]
+
+
+def test_episodic_estimate_survives_episodes_longer_than_a_rollout():
+    """The failure that killed the first collision run.
+
+    An episode can outlast the rollout window -- and does exactly once the
+    constraint works and the policy stops terminating early. Deriving J_C from
+    one rollout's episode_starts then raises; banking completed episodes across
+    rollouts must not.
+    """
+
+    # Episodes of 40 steps against a 16-step rollout: no boundary in rollout 1.
+    env = _collision_env_factory(collide_at=None, length=40)
+    model = _collision_model(env, 0.05)
+    model.learn(total_timesteps=64)          # must not raise
+    rec = model.cmdp_training_diagnostics[0]
+    assert "cmdp/episodes_banked" in rec
+
+
+def test_lambda_is_held_when_no_episode_has_completed():
+    env = _collision_env_factory(collide_at=None, length=400)
+    model = _collision_model(env, 0.05)
+    model.learn(total_timesteps=32)
+    # No episode can have finished, so lambda must not have moved.
+    assert model.dual.value == pytest.approx(0.0)
+    assert model.cmdp_training_diagnostics[-1]["cmdp/episodes_banked"] == 0.0
+
+
+def test_always_colliding_gives_an_episodic_cost_of_one():
+    """J_C must read as a collision PROBABILITY, not a per-step rate."""
+
+    env = _collision_env_factory(collide_at=3, length=8)
+    model = _collision_model(env, 0.05)
+    model.learn(total_timesteps=128)
+    banked = list(model._episode_cost_history)
+    assert banked, "no episodes banked"
+    assert np.mean(banked) == pytest.approx(1.0)
+    # Violated against d = 0.05, so lambda must have risen.
+    assert model.dual.value > 0.0
