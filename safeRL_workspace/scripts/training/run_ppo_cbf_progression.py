@@ -973,6 +973,10 @@ def _cmdp_config_for_variant(
         dual_max=getattr(args, "dual_max", None),
         use_penalty_scaling=bool(getattr(args, "cmdp_penalty_scaling", False)),
         cost_estimator=str(getattr(args, "cost_estimator", "batch_mean")),
+        dual_controller=str(getattr(args, "dual_controller", "ascent")),
+        pid_kp=float(getattr(args, "pid_kp", 0.0)),
+        pid_kd=float(getattr(args, "pid_kd", 0.0)),
+        pid_ema=float(getattr(args, "pid_ema", 0.9)),
     )
 
 
@@ -4897,6 +4901,34 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional cap on lambda. Unset leaves it unbounded above.",
+    )
+    parser.add_argument(
+        "--dual-controller",
+        choices=("ascent", "pid"),
+        default="ascent",
+        help=(
+            "'ascent' is plain projected dual ascent (the baseline). 'pid' is "
+            "the PID-Lagrangian: --dual-lr is the integral gain, with "
+            "--pid-kp / --pid-kd added; --dual-max also caps the integrator."
+        ),
+    )
+    parser.add_argument(
+        "--pid-kp",
+        type=float,
+        default=0.0,
+        help="Proportional gain on the smoothed J_C - d (pid controller only).",
+    )
+    parser.add_argument(
+        "--pid-kd",
+        type=float,
+        default=0.0,
+        help="Derivative gain on a rising smoothed J_C (pid controller only).",
+    )
+    parser.add_argument(
+        "--pid-ema",
+        type=float,
+        default=0.9,
+        help="EMA coefficient smoothing J_C for the P and D terms.",
     )
     parser.add_argument(
         "--cost-estimator",
