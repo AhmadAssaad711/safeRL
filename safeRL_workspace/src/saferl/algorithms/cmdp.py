@@ -78,6 +78,10 @@ import numpy as np
 #                 would instead give collisions per STEP, smaller by roughly
 #                 the episode length, and a budget written for one is
 #                 meaningless under the other.
+ASCENT_CONTROLLER = "ascent"
+PID_CONTROLLER = "pid"
+SUPPORTED_DUAL_CONTROLLERS = (ASCENT_CONTROLLER, PID_CONTROLLER)
+
 BATCH_MEAN_ESTIMATOR = "batch_mean"
 VALUE_MEAN_ESTIMATOR = "value_mean"
 EPISODE_START_ESTIMATOR = "episode_start"
@@ -124,9 +128,24 @@ class CMDPConfig:
     # than from constrained optimization.
     separate_cost_critic: bool = True
     cost_estimator: str = BATCH_MEAN_ESTIMATOR
+    # "ascent" is the locked baseline. "pid" is the PID-Lagrangian of Stooke et
+    # al. (2020), a robustness experiment against integrator windup: the
+    # integral gain is ``dual_lr``, the integrator is projected at zero and,
+    # under ``dual_max``, capped so lambda cannot wind up past its cap.
+    dual_controller: str = ASCENT_CONTROLLER
+    pid_kp: float = 0.0
+    pid_kd: float = 0.0
+    # Smoothing of J_C for the P and D terms; the cost estimate is quantized
+    # and noisy, and a derivative of the raw value would chase that noise.
+    pid_ema: float = 0.9
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cost_limit", float(self.cost_limit))
+        object.__setattr__(
+            self, "dual_controller", str(self.dual_controller).strip().lower()
+        )
+        for name in ("pid_kp", "pid_kd", "pid_ema"):
+            object.__setattr__(self, name, float(getattr(self, name)))
         object.__setattr__(self, "gamma_c", float(self.gamma_c))
         object.__setattr__(self, "gae_lambda_c", float(self.gae_lambda_c))
         object.__setattr__(self, "dual_lr", float(self.dual_lr))
@@ -162,6 +181,17 @@ class CMDPConfig:
                 f"Unsupported cost_estimator {self.cost_estimator!r}; expected "
                 f"one of {SUPPORTED_COST_ESTIMATORS}"
             )
+        if self.dual_controller not in SUPPORTED_DUAL_CONTROLLERS:
+            raise ValueError(
+                f"Unsupported dual_controller {self.dual_controller!r}; "
+                f"expected one of {SUPPORTED_DUAL_CONTROLLERS}"
+            )
+        for name in ("pid_kp", "pid_kd"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if not math.isfinite(self.pid_ema) or not 0.0 <= self.pid_ema < 1.0:
+            raise ValueError("pid_ema must be finite and lie in [0, 1)")
 
     @property
     def cost_scale(self) -> float:
@@ -190,6 +220,10 @@ class CMDPConfig:
             "separate_cost_critic": self.separate_cost_critic,
             "cost_estimator": self.cost_estimator,
             "cost_scale": self.cost_scale,
+            "dual_controller": self.dual_controller,
+            "pid_kp": self.pid_kp,
+            "pid_kd": self.pid_kd,
+            "pid_ema": self.pid_ema,
         }
 
 
@@ -221,6 +255,12 @@ def cmdp_config_from_mapping(config: Mapping[str, Any] | None) -> CMDPConfig:
             config.get("separate_cost_critic", defaults.separate_cost_critic)
         ),
         cost_estimator=str(config.get("cost_estimator", defaults.cost_estimator)),
+        dual_controller=str(
+            config.get("dual_controller", defaults.dual_controller)
+        ),
+        pid_kp=float(config.get("pid_kp", defaults.pid_kp)),
+        pid_kd=float(config.get("pid_kd", defaults.pid_kd)),
+        pid_ema=float(config.get("pid_ema", defaults.pid_ema)),
     )
 
 
@@ -402,9 +442,9 @@ class DualVariable:
 
     Plain ascent, updated once per rollout and held fixed across the epochs of
     that rollout: updating per minibatch makes ``lambda`` chase minibatch noise
-    rather than the constraint. A PID controller on the same error is a
-    strictly later experiment -- it would add a confound to the first
-    measurement of whether the constraint mechanism works at all.
+    rather than the constraint. ``dual_controller="pid"`` swaps in a
+    PID controller on the same error as a robustness experiment against
+    integrator windup; plain ascent stays the default and the baseline.
 
     The projection onto ``lambda >= 0`` is what encodes the inequality: a
     satisfied constraint drives the multiplier to the boundary and switches the
@@ -415,6 +455,11 @@ class DualVariable:
         self._config = config
         self._value = float(config.dual_init)
         self._updates = 0
+        # PID state. The integrator is stored in error units, so lambda's
+        # integral contribution is ``dual_lr * integral``; it starts at the
+        # value that reproduces ``dual_init``.
+        self._integral = float(config.dual_init) / config.dual_lr
+        self._cost_ema: Optional[float] = None
 
     @property
     def value(self) -> float:
@@ -440,13 +485,18 @@ class DualVariable:
             raise ValueError("cost_objective must be finite")
         violation = estimate - self._config.cost_limit
         previous = self._value
-        updated = previous + self._config.dual_lr * violation
+        pid_info: dict[str, float] = {}
+        if self._config.dual_controller == PID_CONTROLLER:
+            updated, pid_info = self._pid_step(estimate, violation)
+        else:
+            updated = previous + self._config.dual_lr * violation
         updated = max(updated, 0.0)
         if self._config.dual_max is not None:
             updated = min(updated, self._config.dual_max)
         self._value = float(updated)
         self._updates += 1
         return {
+            **pid_info,
             "cmdp/lambda": self._value,
             "cmdp/lambda_previous": previous,
             "cmdp/cost_objective": estimate,
@@ -458,10 +508,52 @@ class DualVariable:
             "cmdp/dual_updates": float(self._updates),
         }
 
+    def _pid_step(
+        self, estimate: float, violation: float
+    ) -> tuple[float, dict[str, float]]:
+        """PID-Lagrangian: lambda = Kp*P + Ki*I + Kd*D, before projection.
+
+        The integrator is projected at zero and capped at ``dual_max / Ki``
+        (anti-windup), so a limit below the achievable floor cannot push lambda
+        arbitrarily far. P and D act on the smoothed cost; D only reacts to a
+        rising cost, so it brakes an overshoot and never relaxes the penalty.
+        """
+
+        config = self._config
+        previous_ema = self._cost_ema
+        ema = (
+            estimate
+            if previous_ema is None
+            else config.pid_ema * previous_ema + (1.0 - config.pid_ema) * estimate
+        )
+        self._cost_ema = ema
+
+        integral = max(self._integral + violation, 0.0)
+        if config.dual_max is not None:
+            integral = min(integral, config.dual_max / config.dual_lr)
+        self._integral = integral
+
+        p_term = config.pid_kp * (ema - config.cost_limit)
+        i_term = config.dual_lr * integral
+        d_term = config.pid_kd * (
+            0.0 if previous_ema is None else max(ema - previous_ema, 0.0)
+        )
+        return p_term + i_term + d_term, {
+            "cmdp/pid_p": float(p_term),
+            "cmdp/pid_i": float(i_term),
+            "cmdp/pid_d": float(d_term),
+            "cmdp/cost_ema": float(ema),
+        }
+
     def state_dict(self) -> dict[str, Any]:
         """Checkpointable state: the multiplier is part of the solution."""
 
-        return {"value": self._value, "updates": self._updates}
+        return {
+            "value": self._value,
+            "updates": self._updates,
+            "integral": self._integral,
+            "cost_ema": self._cost_ema,
+        }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         value = float(state["value"])
@@ -469,3 +561,10 @@ class DualVariable:
             raise ValueError("a restored lambda must be finite and non-negative")
         self._value = value
         self._updates = int(state.get("updates", 0))
+        # Checkpoints from before the PID controller carry no integrator; the
+        # value that reproduces lambda is the faithful resume point.
+        self._integral = float(
+            state.get("integral", value / self._config.dual_lr)
+        )
+        ema = state.get("cost_ema")
+        self._cost_ema = None if ema is None else float(ema)
