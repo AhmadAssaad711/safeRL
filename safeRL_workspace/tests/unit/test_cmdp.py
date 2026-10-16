@@ -320,6 +320,93 @@ def test_penalty_scale_is_one_over_one_plus_lambda_when_enabled():
     assert dual.penalty_scale == pytest.approx(0.5)
 
 
+def test_pid_with_zero_gains_matches_plain_ascent():
+    """Kp = Kd = 0 reduces the PID controller to the baseline integrator."""
+
+    ascent = DualVariable(CONFIG)
+    pid = DualVariable(
+        CMDPConfig(
+            cost_limit=0.05, gamma_c=0.98, gae_lambda_c=0.95, dual_lr=0.1,
+            dual_controller="pid",
+        )
+    )
+    for cost in (0.25, 0.4, 0.01, 0.0, 0.3):
+        ascent.update(cost)
+        pid.update(cost)
+        assert pid.value == pytest.approx(ascent.value)
+
+
+def test_pid_integrator_cannot_wind_up_past_the_cap():
+    """An unreachable limit must not leave lambda stuck high after recovery."""
+
+    config = CMDPConfig(
+        cost_limit=0.0, dual_lr=1.0, dual_max=2.0, dual_controller="pid"
+    )
+    dual = DualVariable(config)
+    for _ in range(100):
+        dual.update(1.0)  # limit unreachable for 100 rollouts
+    assert dual.value == pytest.approx(2.0)
+    # With the integrator capped at dual_max / Ki, two satisfied rollouts of
+    # slack 1.0 bring lambda to zero. Uncapped it would take ~100.
+    dual.update(-1.0)
+    dual.update(-1.0)
+    assert dual.value == 0.0
+
+
+def test_pid_derivative_only_reacts_to_a_rising_cost():
+    config = CMDPConfig(
+        cost_limit=1.0, dual_lr=1e-9, dual_controller="pid", pid_kd=10.0,
+        pid_ema=0.0,
+    )
+    dual = DualVariable(config)
+    dual.update(1.0)
+    rising = dual.update(1.5)
+    assert rising["cmdp/pid_d"] == pytest.approx(5.0)
+    falling = dual.update(0.5)
+    assert falling["cmdp/pid_d"] == 0.0
+
+
+def test_pid_proportional_term_acts_immediately():
+    config = CMDPConfig(
+        cost_limit=0.1, dual_lr=1e-9, dual_controller="pid", pid_kp=2.0,
+        pid_ema=0.0,
+    )
+    dual = DualVariable(config)
+    dual.update(0.6)
+    assert dual.value == pytest.approx(1.0, rel=1e-6)  # 2.0 * (0.6 - 0.1)
+
+
+def test_pid_config_round_trips_and_rejects_bad_values():
+    config = CMDPConfig(
+        cost_limit=0.1, dual_controller="pid", pid_kp=1.0, pid_kd=0.5,
+        pid_ema=0.8,
+    )
+    assert cmdp_config_from_mapping(config.as_dict()) == config
+    with pytest.raises(ValueError, match="dual_controller"):
+        CMDPConfig(cost_limit=0.1, dual_controller="adam")
+    with pytest.raises(ValueError, match="pid_kp"):
+        CMDPConfig(cost_limit=0.1, pid_kp=-1.0)
+    with pytest.raises(ValueError, match="pid_ema"):
+        CMDPConfig(cost_limit=0.1, pid_ema=1.0)
+
+
+def test_pid_state_round_trips_and_old_checkpoints_resume():
+    config = CMDPConfig(
+        cost_limit=0.0, dual_lr=0.5, dual_controller="pid", pid_kp=1.0
+    )
+    dual = DualVariable(config)
+    dual.update(0.4)
+    dual.update(0.2)
+    restored = DualVariable(config)
+    restored.load_state_dict(dual.state_dict())
+    assert restored.update(0.3)["cmdp/lambda"] == pytest.approx(
+        dual.update(0.3)["cmdp/lambda"]
+    )
+    legacy = DualVariable(config)
+    legacy.load_state_dict({"value": 3.0, "updates": 7})  # pre-PID checkpoint
+    assert legacy.value == 3.0
+
+
 def test_dual_state_round_trips_for_checkpointing():
     """lambda is part of the solution, so it must survive a checkpoint."""
 
