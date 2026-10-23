@@ -68,6 +68,7 @@ ARM_COLORS = {
     "B2_cbf_nd_reward_actor": "#70AD47",
     "C1_cbf_diff_reward_only": "#9E480E",
     "C2_cbf_projected": "#997300",
+    "C0_cmdp_collision": "#7030A0",
 }
 ACTION_SOURCE = {
     "A1_nominal": "policy",
@@ -75,6 +76,7 @@ ACTION_SOURCE = {
     "B2_cbf_nd_reward_actor": "policy",
     "C1_cbf_diff_reward_only": "raw_actor_mean",
     "C2_cbf_projected": "raw_actor_mean",
+    "C0_cmdp_collision": "policy",
 }
 REQUIRED_CBF_GAINS = {
     "CBF_K0": 4.0,
