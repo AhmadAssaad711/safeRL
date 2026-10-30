@@ -1,59 +1,98 @@
 # safeRL
 
-This repository contains the safe reinforcement-learning work for the
-laneless Karalakou lane-free highway environment.
+Safe reinforcement learning on a lane-free highway. A PPO agent controls
+continuous longitudinal and lateral acceleration among 40 vehicles in MTM
+traffic. A high-order control barrier function (HOCBF) shield can correct its
+commands before they reach the simulator. The study compares ways of bringing
+safety into training, and evaluates every policy both with the shield off
+(CBF-OFF) and on (CBF-ON).
 
-The canonical source of truth is
-[lanelessKaralakou.ipynb](safeRL_workspace/notebooks/lanelessKaralakou.ipynb).
-It defines the environment contract, Karalakou reward, CBF geometry, PPO
-progression, legacy DDPG comparisons, evaluation protocol, and artifact
-layout. The supporting Python runners in the organized scripts package execute the
-same notebook definitions out of process when a long run should not occupy
-the notebook kernel.
+**Project page:** <https://ahmadassaad711.github.io/safeRL/>.
+It has rollout videos in full traffic and in diagnostic scenarios,
+robustness plots and the results.
 
-## Start here
+## Policies compared
 
-1. Install the dependencies from
-   [requirements.txt](safeRL_workspace/requirements.txt).
-2. Read the
-   [lanelessKaralakou reference](safeRL_workspace/docs/lanelessKaralakou_reference.md).
-3. Use the
-   [script and function reference](safeRL_workspace/docs/script_reference.md)
-   to choose a runner.
-4. Open the canonical notebook for the seven-policy PPO/CBF ladder and the
-   retained DDPG reference experiments.
+| Label | Variant | How safety enters training |
+| --- | --- | --- |
+| A1 | `ppo_nominal` | None: the nominal reward only |
+| B1 | `ppo_hocbf_state_cost_raw` | Fixed state-cost penalty in the reward |
+| B2 | `ppo_cbf_nd_reward_actor` | Direct geometric actor loss, HOCBF-filtered training |
+| C1 | `ppo_cbf_diff_reward_only` | Differentiable projection plus reward |
+| C2 | `ppo_cbf_projected` | Differentiable projection plus actor loss |
 
-The current research contract uses MTM surrounding traffic, 100 Hz physics,
-10 Hz policy actions, a 32D target-y plus previous-action PPO observation, and
-strict collision-free 1 km completion for evaluation.
+## Experiment contract
+
+| Item | Value |
+| --- | --- |
+| Environment | `lane-free-v0`, periodic 380 m by 10.2 m road, no lanes |
+| Traffic | 40 vehicles, MTM surrounding traffic |
+| Timing | 100 Hz physics, 20 Hz policy, 20 Hz CBF |
+| Action | Physical acceleration, both components in [-3, 3] m/s² |
+| PPO observation | 32D at five neighbor rows: target-y vehicle features plus the previous action |
+| Evaluation | Collision-free 1,000 m within 3,000 policy steps |
+
+The source of truth is the notebook
+[lanelessKaralakou.ipynb](safeRL_workspace/notebooks/lanelessKaralakou.ipynb),
+explained in the
+[lanelessKaralakou reference](safeRL_workspace/docs/lanelessKaralakou_reference.md).
 
 ## Repository map
 
 | Path | Role |
 | --- | --- |
-| safeRL_workspace/notebooks/lanelessKaralakou.ipynb | Canonical notebook and experiment specification |
-| safeRL_workspace/laneless highway env/ | lane-free-v0 environment and renderer |
-| [safeRL_workspace/scripts/](safeRL_workspace/scripts/README.md) | Organized common, training, evaluation, reporting, rendering, and ops modules |
-| [safeRL_workspace/tests/](safeRL_workspace/tests/README.md) | Unit and protocol tests with shared pytest setup |
-| [safeRL_workspace/docs/](safeRL_workspace/docs/README.md) | Experiment, scenario, and script/function documentation |
-| artifacts/ppo_* directories | Committed safeRL result manifests and compact summaries |
-
-Lane-indexed highway notebooks, DQN implementations, unrelated planning
-experiments, machine-specific duplicate snapshots, scratch backups, and the
-old paper bundle were removed from this repository. The Git history still
-contains the prior state if an old reference is ever needed.
+| [safeRL_workspace/](safeRL_workspace/README.md) | Implementation workspace; run commands from here |
+| safeRL_workspace/notebooks/ | Canonical notebook and experiment specification |
+| safeRL_workspace/laneless highway env/ | `lane-free-v0` environment and renderer |
+| safeRL_workspace/src/saferl/ | New research code: configuration, safety algorithms, artifacts |
+| [safeRL_workspace/scripts/](safeRL_workspace/scripts/README.md) | Training, evaluation, reporting, rendering and ops modules |
+| [safeRL_workspace/tests/](safeRL_workspace/tests/README.md) | Unit, contract and protocol tests |
+| [safeRL_workspace/docs/](safeRL_workspace/docs/README.md) | Experiment, scenario and script documentation |
+| [artifacts/](artifacts/README.md) | Committed result manifests and compact summaries |
+| docs/ | Source of the GitHub Pages project page |
+| [AGENTS.md](AGENTS.md) | Architecture and change rules for contributors |
 
 ## Setup
 
-    py -3.12 -m venv .venv
-    .\.venv\Scripts\Activate.ps1
-    python -m pip install --upgrade pip
-    python -m pip install -r safeRL_workspace\requirements.txt
+Python 3.10 or newer. On Linux or macOS:
 
-For environment-only smoke testing:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r safeRL_workspace/requirements.txt
+```
 
-    Set-Location safeRL_workspace
-    python -m scripts.ops.mtm_laneless_smoke --help
+On Windows (PowerShell):
 
-Do not run the full 1M-transition ladder accidentally. The notebook's shared
-launcher and the script CLI should be checked before enabling training.
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r safeRL_workspace\requirements.txt
+```
+
+## Quick start
+
+Run every command from `safeRL_workspace`:
+
+```bash
+cd safeRL_workspace
+python -m scripts.ops.mtm_laneless_smoke --help        # environment smoke check
+python -m pytest -q tests                              # unit and contract tests
+python -m scripts.evaluation.evaluate_laneless_karalakou --help
+```
+
+Inspect `--help` before starting any training run. The full training ladder
+is long, so check the variant, seed, budget and output directory first.
+
+## Documentation
+
+- [Experiment contract](safeRL_workspace/docs/lanelessKaralakou_reference.md):
+  environment, reward, observation, CBF and evaluation.
+- [Script and function reference](safeRL_workspace/docs/script_reference.md):
+  which module to run for which task.
+- [Diagnostic scenarios](safeRL_workspace/docs/diagnostic_scenarios.md):
+  the fixed scenes behind the scenario videos.
+- [Documentation index](safeRL_workspace/docs/README.md): every study and
+  experiment log.
