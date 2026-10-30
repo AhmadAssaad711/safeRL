@@ -40,14 +40,14 @@ that ended early.
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
   <div class="arm">A1</div>
-  <video src="media/full_road/a1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/full_road/a1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/full_road/a1_cbf_off.gif" alt="A1 rollout, full highway traffic, CBF-OFF">
+  <img src="media/full_road/a1_cbf_on.gif" alt="A1 rollout, full highway traffic, CBF-ON">
   <div class="arm">B1</div>
-  <video src="media/full_road/b1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/full_road/b1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/full_road/b1_cbf_off.gif" alt="B1 rollout, full highway traffic, CBF-OFF">
+  <img src="media/full_road/b1_cbf_on.gif" alt="B1 rollout, full highway traffic, CBF-ON">
   <div class="arm">C1</div>
-  <video src="media/full_road/c1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/full_road/c1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/full_road/c1_cbf_off.gif" alt="C1 rollout, full highway traffic, CBF-OFF">
+  <img src="media/full_road/c1_cbf_on.gif" alt="C1 rollout, full highway traffic, CBF-ON">
 </div>
 
 ## Scenarios
@@ -63,14 +63,14 @@ A passing gap is available; compare which policies actually commit to it.
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
   <div class="arm">A1</div>
-  <video src="media/scenarios/open_passing_gap/a1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/open_passing_gap/a1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/open_passing_gap/a1_cbf_off.gif" alt="A1 rollout, open passing gap, CBF-OFF">
+  <img src="media/scenarios/open_passing_gap/a1_cbf_on.gif" alt="A1 rollout, open passing gap, CBF-ON">
   <div class="arm">B1</div>
-  <video src="media/scenarios/open_passing_gap/b1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/open_passing_gap/b1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/open_passing_gap/b1_cbf_off.gif" alt="B1 rollout, open passing gap, CBF-OFF">
+  <img src="media/scenarios/open_passing_gap/b1_cbf_on.gif" alt="B1 rollout, open passing gap, CBF-ON">
   <div class="arm">B2</div>
-  <video src="media/scenarios/open_passing_gap/b2_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/open_passing_gap/b2_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/open_passing_gap/b2_cbf_off.gif" alt="B2 rollout, open passing gap, CBF-OFF">
+  <img src="media/scenarios/open_passing_gap/b2_cbf_on.gif" alt="B2 rollout, open passing gap, CBF-ON">
 </div>
 
 ### Boxed in
@@ -80,14 +80,14 @@ Both nearby side gaps are occupied; the policy should not force a pass.
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
   <div class="arm">A1</div>
-  <video src="media/scenarios/boxed_in/a1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/boxed_in/a1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/boxed_in/a1_cbf_off.gif" alt="A1 rollout, boxed in, CBF-OFF">
+  <img src="media/scenarios/boxed_in/a1_cbf_on.gif" alt="A1 rollout, boxed in, CBF-ON">
   <div class="arm">B1</div>
-  <video src="media/scenarios/boxed_in/b1_cbf_off.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/boxed_in/b1_cbf_off.gif" alt="B1 rollout, boxed in, CBF-OFF">
   <div class="missing">clip not available</div>
   <div class="arm">B2</div>
-  <video src="media/scenarios/boxed_in/b2_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/boxed_in/b2_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/boxed_in/b2_cbf_off.gif" alt="B2 rollout, boxed in, CBF-OFF">
+  <img src="media/scenarios/boxed_in/b2_cbf_on.gif" alt="B2 rollout, boxed in, CBF-ON">
 </div>
 
 ### Rear pressure
@@ -98,14 +98,14 @@ side gap.
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
   <div class="arm">A1</div>
-  <video src="media/scenarios/rear_pressure/a1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/rear_pressure/a1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/rear_pressure/a1_cbf_off.gif" alt="A1 rollout, rear pressure, CBF-OFF">
+  <img src="media/scenarios/rear_pressure/a1_cbf_on.gif" alt="A1 rollout, rear pressure, CBF-ON">
   <div class="arm">B1</div>
-  <video src="media/scenarios/rear_pressure/b1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/rear_pressure/b1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/rear_pressure/b1_cbf_off.gif" alt="B1 rollout, rear pressure, CBF-OFF">
+  <img src="media/scenarios/rear_pressure/b1_cbf_on.gif" alt="B1 rollout, rear pressure, CBF-ON">
   <div class="arm">B2</div>
-  <video src="media/scenarios/rear_pressure/b2_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/rear_pressure/b2_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/rear_pressure/b2_cbf_off.gif" alt="B2 rollout, rear pressure, CBF-OFF">
+  <img src="media/scenarios/rear_pressure/b2_cbf_on.gif" alt="B2 rollout, rear pressure, CBF-ON">
 </div>
 
 ### Boundary recovery
@@ -116,14 +116,14 @@ inward.
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
   <div class="arm">A1</div>
-  <video src="media/scenarios/boundary_recovery_road_edge/a1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/boundary_recovery_road_edge/a1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/boundary_recovery_road_edge/a1_cbf_off.gif" alt="A1 rollout, boundary recovery road edge, CBF-OFF">
+  <img src="media/scenarios/boundary_recovery_road_edge/a1_cbf_on.gif" alt="A1 rollout, boundary recovery road edge, CBF-ON">
   <div class="arm">B1</div>
-  <video src="media/scenarios/boundary_recovery_road_edge/b1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/boundary_recovery_road_edge/b1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/boundary_recovery_road_edge/b1_cbf_off.gif" alt="B1 rollout, boundary recovery road edge, CBF-OFF">
+  <img src="media/scenarios/boundary_recovery_road_edge/b1_cbf_on.gif" alt="B1 rollout, boundary recovery road edge, CBF-ON">
   <div class="arm">B2</div>
-  <video src="media/scenarios/boundary_recovery_road_edge/b2_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/boundary_recovery_road_edge/b2_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/boundary_recovery_road_edge/b2_cbf_off.gif" alt="B2 rollout, boundary recovery road edge, CBF-OFF">
+  <img src="media/scenarios/boundary_recovery_road_edge/b2_cbf_on.gif" alt="B2 rollout, boundary recovery road edge, CBF-ON">
 </div>
 
 ### Sudden lead slowdown
@@ -134,14 +134,14 @@ side gaps.
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
   <div class="arm">A1</div>
-  <video src="media/scenarios/sudden_lead_slowdown/a1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/sudden_lead_slowdown/a1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/sudden_lead_slowdown/a1_cbf_off.gif" alt="A1 rollout, sudden lead slowdown, CBF-OFF">
+  <img src="media/scenarios/sudden_lead_slowdown/a1_cbf_on.gif" alt="A1 rollout, sudden lead slowdown, CBF-ON">
   <div class="arm">B1</div>
-  <video src="media/scenarios/sudden_lead_slowdown/b1_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/sudden_lead_slowdown/b1_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/sudden_lead_slowdown/b1_cbf_off.gif" alt="B1 rollout, sudden lead slowdown, CBF-OFF">
+  <img src="media/scenarios/sudden_lead_slowdown/b1_cbf_on.gif" alt="B1 rollout, sudden lead slowdown, CBF-ON">
   <div class="arm">B2</div>
-  <video src="media/scenarios/sudden_lead_slowdown/b2_cbf_off.mp4" autoplay loop muted playsinline></video>
-  <video src="media/scenarios/sudden_lead_slowdown/b2_cbf_on.mp4" autoplay loop muted playsinline></video>
+  <img src="media/scenarios/sudden_lead_slowdown/b2_cbf_off.gif" alt="B2 rollout, sudden lead slowdown, CBF-OFF">
+  <img src="media/scenarios/sudden_lead_slowdown/b2_cbf_on.gif" alt="B2 rollout, sudden lead slowdown, CBF-ON">
 </div>
 
 ## Robustness
