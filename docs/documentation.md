@@ -3,53 +3,230 @@ layout: page
 title: Documentation
 ---
 
-A short guide to the work and the code behind this page. The full,
-maintained documentation lives in the
+A guide to the work and the code behind this site. The full, maintained
+documentation lives in the
 [repository](https://github.com/AhmadAssaad711/safeRL).
+
+- [The problem](#the-problem)
+- [Environment](#environment)
+- [Observation and action](#observation-and-action)
+- [The safety shield](#the-safety-shield)
+- [Reward](#reward)
+- [The policies](#the-policies)
+- [Training](#training)
+- [Evaluation](#evaluation)
+- [Diagnostic scenarios](#diagnostic-scenarios)
+- [Reading the robustness plots](#reading-the-robustness-plots)
+- [Reproducing this site](#reproducing-this-site)
+- [The code](#the-code)
+- [Further reading](#further-reading)
 
 ## The problem
 
-Driving on a lane-free highway means choosing both a speed and a lateral
-position at every moment, with no lanes to organize traffic. The ego vehicle
-is a PPO policy. It outputs a longitudinal and a lateral acceleration 20 times
-per second, while the simulator runs at 100 Hz. The surrounding 40 vehicles
-follow MTM traffic dynamics, with personalities ranging from cautious to
-aggressive. The road is a 380 m by 10.2 m loop.
+On a lane-free highway, there are no lanes to organize traffic, so every
+vehicle chooses both its speed and its lateral position at every moment. The
+ego vehicle is a PPO policy. A control barrier function (CBF) shield can
+correct its commands at runtime, but a shield keeps a policy safe whether or
+not the policy learned anything about safety.
 
-## The safety shield
-
-Safety is defined by a barrier function for every nearby vehicle pair and for
-both road edges. Each vehicle is enclosed in an ellipse, and the barrier is
-positive while the ego stays outside it. A high-order CBF (HOCBF) condition
-turns each barrier into a linear constraint on the acceleration command. At
-every policy step, the shield checks whether the policy's action satisfies
-all of them. If not, it projects the action to the nearest one that does.
-
-## The question
-
-The shield guarantees nothing about what the policy itself learned. So every
-policy is evaluated twice:
+So every policy is evaluated twice:
 
 - **CBF-OFF**: the policy's own actions, with no shield.
 - **CBF-ON**: the policy plus the deployed shield.
 
-The policies differ only in how safety enters training, from not at all (A1),
-through reward penalties (B1), to losses and projections that use the barrier
-geometry directly (B2, C1, C2). A policy that has internalized safety should
-stay safe with the shield off.
+The policies differ only in how safety information reaches training. A policy
+that has internalized safety should stay safe with the shield off, not only
+with it on.
 
-## How it is evaluated
+## Environment
 
-- **Task:** drive 1,000 m without a collision within 3,000 policy steps. A
-  collision ends the episode and counts as a failure.
-- **Training:** seven seeds per policy (307 to 427 in steps of 20). The main
-  five-policy study trains each policy for 1,000,000 steps.
-- **Evaluation:** 200 episodes per seed in each mode. Tables report the mean
-  and standard deviation across the seven seed means.
-- **Safety KPIs:** collisions per km, minimum barrier value, QP failure rate,
-  intervention rate and correction size.
-- **Task KPIs:** return, episode length, completion rate, speed and lateral
-  tracking error, and jerk.
+The custom Gymnasium environment `lane-free-v0`:
+
+| Item | Value |
+| --- | --- |
+| Road | Periodic 380 m by 10.2 m ring with no lanes |
+| Traffic | 40 vehicles; surrounding traffic follows the MTM model, with personalities from cautious to aggressive |
+| Surrounding speeds | Desired speeds sampled from 15 to 25 m/s |
+| Ego speed target | 16 m/s |
+| Timing | 100 Hz physics, 20 Hz policy, 20 Hz CBF; each action is held for five physics frames |
+| Collisions | A collision ends the episode |
+
+The simulator keeps surrounding vehicles from colliding with each other, but
+by default that guard does not react to the ego. Avoiding the ego's collisions
+is left to its policy and shield.
+
+## Observation and action
+
+**Observation.** One row for the ego and one per nearest neighbor, each
+`[dx, dy, vx, vy, v_desired]`, normalized. The ego row carries the ego's
+lateral position and the target lateral position. The previous executed
+action is appended. The width is `(1 + neighbors) × 5 + 2`. The policies on
+this site see seven neighbors and drop the constant ego desired-speed slot,
+for 41 features.
+
+**Action.** Physical longitudinal and lateral acceleration, each in
+[-3, 3] m/s². The action passes through separately logged stages:
+
+```text
+actor mean → sampled action → box-clipped action → CBF-safe action
+           → normalized simulator command → executed acceleration
+```
+
+The previous *executed* action is what enters the next observation, so the
+policy sees what actually happened, not what it asked for.
+
+## The safety shield
+
+Each nearby vehicle is enclosed in a fixed ellipse sized for a 3.6 m by 1.8 m
+reference vehicle. The barrier
+
+```text
+h(dx, dy) = dx²/A² + dy²/B² − 1,    A = 3.6/√2 m,  B = 1.8/√2 m
+```
+
+is non-negative while the ego is outside the ellipse. The two road edges add
+boundary barriers. Acceleration appears only in the second derivative of h,
+so the shield uses a second-order (high-order) CBF condition:
+
+```text
+ψ1 = ḣ + c1·h
+ψ2 = ψ̇1 + c2·ψ1 = ḧ + (c1 + c2)·ḣ + c1·c2·h ≥ 0
+```
+
+with (c1, c2) = (0.5, 8). Each condition is linear in the acceleration
+command, so the safe commands form a polygon in the 2D action plane.
+
+At every policy step, the shield:
+
+1. builds one row per nearest neighbor (up to seven here) and per road edge;
+2. keeps the policy's action if it satisfies every row;
+3. otherwise projects it onto the safe polygon, using an exact 2D solver
+   with OSQP as a fallback;
+4. if no action is safe, uses the least-violating action, then an evasive
+   emergency action.
+
+## Reward
+
+The reward combines tracking, progress and comfort terms:
+
+```text
+r = ε / (ε + wx·cx + wy·cy + wf·cf + way·cay)
+    + progress − jerk_penalty + collision_or_overtake_adjustment
+```
+
+- `cx`: speed error from the 16 m/s target;
+- `cy`: lateral error from a target lateral position, chosen from a smooth
+  map of free space ahead;
+- `cf`, `cay`: a potential-field cost from nearby vehicles and a lateral
+  comfort cost. The potential-field weight is zero in these runs.
+- progress: forward metres, normalized by 2 m;
+- a bounded jerk penalty, a −2.5 collision penalty and a +0.5 overtake bonus.
+
+## The policies
+
+| Label | Variant | CBF in training | How safety reaches the policy |
+| --- | --- | --- | --- |
+| A1 | `ppo_nominal` | No | None: the reward above only |
+| B1 | `ppo_hocbf_state_cost_raw` | No | A fixed state-cost penalty, built from the barrier, added to the reward |
+| B2 | `ppo_cbf_nd_reward_actor` | Yes, hard shield | A reward penalty, plus an actor loss pulling the policy toward the shield's safe action |
+| C1 | `ppo_cbf_diff_reward_only` | Yes, differentiable projection | A reward penalty; gradients flow through the projection |
+| C2 | `ppo_cbf_projected` | Yes, differentiable projection | A reward penalty, plus an actor loss on the projected action |
+
+The policies form a ladder: A1 never sees the barrier, and B1 sees it only as
+a cost. B2 learns from the shield's corrections, while C1 and C2 put the
+projection inside the policy itself.
+
+C1 and C2 project their own action even with the external shield off. Their
+CBF-OFF results therefore bypass that internal projection and use the raw
+actor output, so that every policy's CBF-OFF number measures the network
+alone.
+
+## Training
+
+| Setting | Value |
+| --- | --- |
+| Algorithm | PPO (Stable-Baselines3) |
+| Hyperparameters | learning rate 1e-4, γ 0.99, GAE λ 0.95, clip 0.2, entropy 0.005, 10 epochs, batch 100 |
+| Networks | Separate policy and value networks, [256, 128] each |
+| Rollouts | 20 parallel environments sharing a 1,000-step rollout (50 steps each) |
+| Budget | 1,000,000 timesteps per policy and seed |
+| Seeds | 307, 327, 347, 367, 387, 407, 427 |
+| Actor-loss weight | λ = 1.0 for B2 and C2 |
+
+The seeds are spaced by 20 because each run's 20 environments use seeds `s`
+to `s + 19`. Closer seeds would share traffic scenarios and would not be
+independent repeats.
+
+## Evaluation
+
+Each trained policy drives 200 episodes with the shield off, then the same 200
+scenarios with it on. An episode **completes** only if the ego covers 1,000 m
+with no collision within 3,000 policy steps (150 s).
+
+| KPI | Meaning |
+| --- | --- |
+| Ego collisions / km | Collisions per kilometre driven |
+| Minimum h | Lowest barrier value reached; below zero means inside an ellipse |
+| QP failure rate | Share of steps where the shield found no safe action |
+| Intervention rate | Share of steps where the shield changed the action |
+| Correction norm | Size of the shield's correction |
+| Episode return | Total reward per episode |
+| Episode length | Policy steps per episode |
+| Completion rate | Share of episodes that complete the 1,000 m task |
+| Speed error | Mean absolute deviation from 16 m/s |
+| Lateral error | Mean distance from the lateral target |
+| Jerk | Mean change in acceleration |
+
+Each seed gives one value per KPI. The results tables report the mean and
+standard deviation over the seven seeds.
+
+## Diagnostic scenarios
+
+Fixed, scripted scenes that each test one driving decision. Every policy
+starts from the same scene.
+
+| Scenario | What a good policy does |
+| --- | --- |
+| Open road | Keeps steady progress with little drift; the shield barely acts |
+| Open passing gap | Commits to an available passing gap |
+| Reject overtake | Refuses a tempting gap that holds a fast closing vehicle |
+| Tight-slot trap | Avoids diving into a slot that is too tight |
+| Boundary recovery, both edges | Moves inward from the road edge past a slow blocker |
+| Boxed in | Does not force a pass when both side gaps are occupied |
+| Rear pressure | Escapes a fast car closing from behind through the cleaner side |
+| Sudden lead slowdown | Reacts to a sharply braking leader without diving into traffic |
+| Staggered traffic | Threads through staggered traffic via the clean side |
+
+## Reading the robustness plots
+
+The plots on the home page show the HOCBF margin of the policy's own action:
+
+```text
+S(t) = min over constraints i of [ b_i(t) − A_i(t) · u_raw(t) ]
+```
+
+Above zero, the raw action satisfies every safety constraint. Below zero, at
+least one is violated and a shield would have to step in. The curves are
+means over seven rollouts per policy. C1 and C2 are measured on their raw
+actor output, so the margin reflects the network rather than its projection. A
+rollout stops contributing after it crashes, so a curve that ends early means
+no rollout of that policy was still running.
+
+## Reproducing this site
+
+Run from `safeRL_workspace`. Each script documents its options under
+`--help`.
+
+| Output | Command |
+| --- | --- |
+| Five policies × seven seeds | `python -m scripts.ops.run_safety_matrix_study` |
+| B2 and C2 at λ = 1.0 | `... run_safety_matrix_study --only B2_cbf_nd_reward_actor C2_cbf_projected --actor-lambda 1.0` |
+| Results tables | `python -m scripts.reporting.build_final_variant_comparison_tables` |
+| Robustness plots | `python -m scripts.reporting.plot_hocbf_margin_aggregate` |
+| Highway GIFs | `python -m scripts.rendering.render_policy_traffic_gifs` |
+| Scenario GIFs | `python -m scripts.rendering.render_scenario_policy_gifs` |
+
+The full study is 35 training runs; add `--dry-run` to print the plan first.
 
 ## The code
 
@@ -57,32 +234,24 @@ stay safe with the shield off.
 | --- | --- |
 | Environment | `safeRL_workspace/laneless highway env/lane_free_env.py` |
 | Canonical experiment | `safeRL_workspace/notebooks/lanelessKaralakou.ipynb` |
-| Configuration and new research code | `safeRL_workspace/src/saferl/` |
+| Configuration, rewards, safety | `safeRL_workspace/src/saferl/` |
+| CBF projection | `safeRL_workspace/scripts/common/` |
 | Training runners | `safeRL_workspace/scripts/training/` |
 | Evaluation and KPIs | `safeRL_workspace/scripts/evaluation/` |
 | Tables and figures | `safeRL_workspace/scripts/reporting/` |
-| Rollout videos | `safeRL_workspace/scripts/rendering/` |
+| Rollout GIFs | `safeRL_workspace/scripts/rendering/` |
+| Study launchers, checks | `safeRL_workspace/scripts/ops/` |
 | Tests | `safeRL_workspace/tests/` |
-
-## Reproducing this page
-
-Run from `safeRL_workspace`; each script documents its options under
-`--help`.
-
-| Output on this page | Command |
-| --- | --- |
-| Five-policy, seven-seed study | `python -m scripts.ops.run_safety_matrix_study` |
-| Results tables | `python -m scripts.reporting.build_final_variant_comparison_tables` |
-| Robustness plots | `python -m scripts.reporting.plot_hocbf_margin_aggregate` |
-| Scenario videos | `python -m scripts.rendering.render_policy_scenarios` |
 
 ## Further reading
 
 - [Experiment contract](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/lanelessKaralakou_reference.md):
-  environment, reward, observation, CBF and evaluation in full.
+  environment, observation, reward, CBF and evaluation in full.
 - [Script and function reference](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/script_reference.md):
   which module to run for which task.
 - [Diagnostic scenarios](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/diagnostic_scenarios.md):
-  the fixed scenes used in the videos and plots.
+  the fixed scenes and the counterfactual protocol.
+- [Trial log](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/experiments/trial_log.md):
+  every trial after the five-policy study, with verdicts.
 - [Documentation index](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/README.md):
-  every study and experiment log.
+  all other studies and notes.
