@@ -87,3 +87,7 @@ notes/
 
 # pytest --basetemp scratch markers from an ad-hoc CBF check run
 .cbf-check-*/
+
+# Curated GitHub Pages media (compressed clips and figures shown on the site)
+!docs/media/**/*.mp4
+!docs/media/**/*.png
