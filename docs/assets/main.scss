@@ -1,0 +1,59 @@
+---
+---
+
+$content-width: 1000px;
+
+@import "minima";
+
+.clip-grid {
+  display: grid;
+  grid-template-columns: 4rem 1fr 1fr;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.clip-grid .head {
+  font-weight: 600;
+  text-align: center;
+}
+
+.clip-grid .arm {
+  font-weight: 600;
+}
+
+.clip-grid img,
+.figure-grid img {
+  width: 100%;
+  display: block;
+  border: 1px solid #e8e8e8;
+}
+
+.clip-grid .missing {
+  color: #828282;
+  font-style: italic;
+  text-align: center;
+}
+
+.figure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.figure-grid figure {
+  margin: 0;
+}
+
+.figure-grid figcaption,
+.caption {
+  color: #828282;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 600px) {
+  .clip-grid {
+    grid-template-columns: 2.5rem 1fr 1fr;
+  }
+}

@@ -3,3 +3,10 @@ description: >-
   Safe reinforcement learning on a lane-free highway with high-order control
   barrier functions.
 theme: minima
+
+# Project site path: https://ahmadassaad711.github.io/safeRL/
+baseurl: /safeRL
+
+# Pages linked in the site header.
+header_pages:
+  - documentation.md
