@@ -204,8 +204,44 @@ means no rollout of that policy was still running.
 
 ## Results
 
-*Coming next: the CBF-OFF and CBF-ON results tables.*
+Every policy is trained with seven seeds (307 to 427 in steps of 20) and
+evaluated over 200 episodes per seed in each mode. Values are the mean and
+standard deviation across the seven seed means. B2 and C2 are shown at
+λ = 1.0, the best setting found. An episode completes only if it covers
+1,000 m without a collision within 3,000 policy steps.
+
+*The numbers are pending and will be filled in from the exported tables.*
+
+### Table 1: CBF-OFF, the policy alone
+
+No shield at deployment. C1 and C2 carry an internal projection layer, so
+their CBF-OFF results bypass it and use the raw actor mean.
+
+| Policy | Collisions / km | Completion rate | Minimum h | Intervention rate | Episode return |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A1 | – | – | – | – | – |
+| B1 | – | – | – | – | – |
+| B2 | – | – | – | – | – |
+| C1 | – | – | – | – | – |
+| C2 | – | – | – | – | – |
+
+### Table 2: CBF-ON, the policy with the shield
+
+The deployed HOCBF shield is active. For C1 and C2, the internal projection
+and the external shield both run.
+
+| Policy | Collisions / km | Completion rate | Minimum h | Intervention rate | Episode return |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A1 | – | – | – | – | – |
+| B1 | – | – | – | – | – |
+| B2 | – | – | – | – | – |
+| C1 | – | – | – | – | – |
+| C2 | – | – | – | – | – |
 
 ## Documentation
 
-*Coming next: links to the experiment contract and code documentation.*
+A [short guide to the work and the code](documentation.html): the problem,
+the shield, the evaluation, and the commands that reproduce this page. The
+full documentation is in the
+[repository](https://github.com/AhmadAssaad711/safeRL), starting with the
+[experiment contract](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/lanelessKaralakou_reference.md).
