@@ -56,4 +56,50 @@ $content-width: 1000px;
   .clip-grid {
     grid-template-columns: 2.5rem 1fr 1fr;
   }
+
+  .figure-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-bottom: 1rem;
+}
+
+table.results {
+  width: 100%;
+  font-size: 0.85rem;
+  border-collapse: collapse;
+}
+
+table.results th,
+table.results td {
+  padding: 6px 8px;
+  text-align: right;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+table.results th[scope="row"],
+table.results thead th:first-child {
+  text-align: left;
+}
+
+table.results td.key {
+  outline: 1.5px solid #2a78d6;
+  outline-offset: -3px;
+}
+
+table.results .ci {
+  display: block;
+  color: #828282;
+  font-size: 0.75rem;
+}
+
+// Plain Markdown tables scroll sideways on narrow screens instead of
+// widening the page.
+.page-content table:not(.results) {
+  display: block;
+  overflow-x: auto;
 }

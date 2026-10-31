@@ -129,12 +129,17 @@ r = ε / (ε + wx·cx + wy·cy + wf·cf + way·cay)
 | A1 | `ppo_nominal` | No | None: the reward above only |
 | B1 | `ppo_hocbf_state_cost_raw` | No | A fixed state-cost penalty, built from the barrier, added to the reward |
 | B2 | `ppo_cbf_nd_reward_actor` | Yes, hard shield | A reward penalty, plus an actor loss pulling the policy toward the shield's safe action |
+| C0 | `ppo_cmdp_collision` | No | Constrained PPO: a Lagrange multiplier keeps an episodic collision cost under a budget |
 | C1 | `ppo_cbf_diff_reward_only` | Yes, differentiable projection | A reward penalty; gradients flow through the projection |
 | C2 | `ppo_cbf_projected` | Yes, differentiable projection | A reward penalty, plus an actor loss on the projected action |
 
 The policies form a ladder: A1 never sees the barrier, and B1 sees it only as
 a cost. B2 learns from the shield's corrections, while C1 and C2 put the
-projection inside the policy itself.
+projection inside the policy itself. C0 is the constrained-RL baseline: it
+learns from collisions as a budgeted cost rather than from the barrier.
+
+The results tables compare A1, B1, B2 and C0. C1 and C2 appear in the videos
+and robustness plots.
 
 C1 and C2 project their own action even with the external shield off. Their
 CBF-OFF results therefore bypass that internal projection and use the raw
@@ -177,8 +182,13 @@ with no collision within 3,000 policy steps (150 s).
 | Lateral error | Mean distance from the lateral target |
 | Jerk | Mean change in acceleration |
 
-Each seed gives one value per KPI. The results tables report the mean and
-standard deviation over the seven seeds.
+Each seed gives one value per KPI. The results tables report the mean over
+seeds with a 95% confidence interval, and test each policy against A1 with a
+Holm correction for multiple comparisons.
+
+The videos differ in one respect: a collision is counted but does not end the
+rendered episode, so the vehicles keep driving and the clips run their full
+length.
 
 ## Diagnostic scenarios
 
