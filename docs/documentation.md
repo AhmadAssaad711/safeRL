@@ -174,9 +174,10 @@ Each seed gives one value per KPI. The results tables report the mean over
 seeds with a 95% confidence interval, and test each policy against A1 with a
 Holm correction for multiple comparisons.
 
-The videos differ in one respect: a collision is counted but does not end the
-rendered episode, so the vehicles keep driving and the clips run their full
-length.
+The scenario videos differ in one respect: a collision is counted but does
+not end the rendered episode, so the vehicles keep driving and every clip runs
+its full length. The highway videos follow the evaluation rule instead and stop
+at the ego's first collision.
 
 ## Diagnostic scenarios
 

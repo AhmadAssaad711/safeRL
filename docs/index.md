@@ -34,8 +34,9 @@ The study separates what the policy learns from what the shield supplies:
 
 Each policy driving in the full 40-vehicle traffic. The ego vehicle is
 green. The left clip has the shield off (CBF-OFF) and the right clip has it on
-(CBF-ON). In these videos a collision does not end the episode: it is counted,
-and the vehicles stay on the road and keep driving.
+(CBF-ON). These clips are rendered like the evaluation episodes, so a clip
+stops when the ego collides: each CBF-OFF clip ends at a collision, while all
+three CBF-ON clips run the full 20 seconds.
 
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
