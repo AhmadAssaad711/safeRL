@@ -11,6 +11,8 @@ they do not define the experiment contract.
   KPI and filter-contribution dashboards.
 - `build_cbf_ablation_report.py`: factorial CBF PDF report.
 - `build_paper_results.py`: provenance-preserving paper-result bundle.
+- `plot_shield_gap.py`: the shield gap, the policy's own collision rate against
+  the shielded rate, from the paired measurements recorded in `docs/`.
 
 Prefer explicit `--input`, `--study-dir`, and `--output` arguments. Generated
 figures and logs remain ignored; deliberate compact summaries belong under
