@@ -85,7 +85,7 @@ Both nearby side gaps are occupied; the policy should not force a pass.
   <img src="media/scenarios/boxed_in/a1_cbf_on.gif" alt="A1 rollout, boxed in, CBF-ON">
   <div class="arm">B1</div>
   <img src="media/scenarios/boxed_in/b1_cbf_off.gif" alt="B1 rollout, boxed in, CBF-OFF">
-  <div class="missing">clip not available</div>
+  <img src="media/scenarios/boxed_in/b1_cbf_on.gif" alt="B1 rollout, boxed in, CBF-ON">
   <div class="arm">B2</div>
   <img src="media/scenarios/boxed_in/b2_cbf_off.gif" alt="B2 rollout, boxed in, CBF-OFF">
   <img src="media/scenarios/boxed_in/b2_cbf_on.gif" alt="B2 rollout, boxed in, CBF-ON">

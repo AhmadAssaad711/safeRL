@@ -29,12 +29,6 @@ $content-width: 1000px;
   border: 1px solid #e8e8e8;
 }
 
-.clip-grid .missing {
-  color: #828282;
-  font-style: italic;
-  text-align: center;
-}
-
 .figure-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
