@@ -7,6 +7,8 @@ title: Home
 
 <!-- TODO: paper title, authors, venue, and PDF link. -->
 
+<p class="code-link"><a class="button" href="https://github.com/AhmadAssaad711/safeRL">View the code on GitHub</a> <span>github.com/AhmadAssaad711/safeRL</span></p>
+
 ## Overview
 
 A PPO agent drives on a lane-free highway: a periodic 380 m by 10.2 m road
@@ -27,9 +29,6 @@ The study separates what the policy learns from what the shield supplies:
 | A1 | Nominal PPO | `ppo_nominal` | None: the nominal reward only |
 | B1 | HOCBF State-Cost | `ppo_hocbf_state_cost_raw` | Fixed HOCBF state-cost penalty in the reward; trained without the shield |
 | B2 | HOCBF Actor-Loss | `ppo_cbf_nd_reward_actor` | Actor loss toward the shield's safe action, with the shield in training |
-| C0 | HOCBF CMDP | `ppo_cmdp_collision` | Constrained PPO: a Lagrange multiplier keeps an episodic collision cost under a budget; trained without the shield |
-| C1 | Differentiable projection | `ppo_cbf_diff_reward_only` | Differentiable projection plus reward (videos and robustness plots only) |
-| C2 | Differentiable projection + loss | `ppo_cbf_projected` | Differentiable projection plus actor loss (robustness plots only) |
 
 ## On the highway
 
@@ -46,9 +45,9 @@ and the vehicles stay on the road and keep driving.
   <div class="arm">B1</div>
   <img src="media/full_road/b1_cbf_off.gif" alt="B1 rollout, full highway traffic, CBF-OFF">
   <img src="media/full_road/b1_cbf_on.gif" alt="B1 rollout, full highway traffic, CBF-ON">
-  <div class="arm">C1</div>
-  <img src="media/full_road/c1_cbf_off.gif" alt="C1 rollout, full highway traffic, CBF-OFF">
-  <img src="media/full_road/c1_cbf_on.gif" alt="C1 rollout, full highway traffic, CBF-ON">
+  <div class="arm">B2</div>
+  <img src="media/full_road/b2_cbf_off.gif" alt="B2 rollout, full highway traffic, CBF-OFF">
+  <img src="media/full_road/b2_cbf_on.gif" alt="B2 rollout, full highway traffic, CBF-ON">
 </div>
 
 ## Scenarios
@@ -230,7 +229,6 @@ corrections.
       <tr><th scope="row">Nominal PPO (A1)</th><td>4.04<span class="ci">[3.33, 4.74]</span></td><td>208.5<span class="ci">[159.1, 258.0]</span></td><td>0.036<span class="ci">[0.019, 0.053]</span></td><td>2.07<span class="ci">[1.82, 2.32]</span></td><td>1.99<span class="ci">[1.09, 2.90]</span></td><td>3.44<span class="ci">[2.43, 4.46]</span></td></tr>
       <tr><th scope="row">HOCBF State-Cost (B1)</th><td>3.74<span class="ci">[3.27, 4.22]</span></td><td>259.2<span class="ci">[232.4, 286.0]</span></td><td>0.056<span class="ci">[0.027, 0.085]</span></td><td>1.76<span class="ci">[1.45, 2.07]</span></td><td><strong>0.84</strong><span class="ci">[0.78, 0.90]</span></td><td>4.45<span class="ci">[2.40, 6.50]</span></td></tr>
       <tr><th scope="row">HOCBF Actor-Loss (B2)</th><td class="key">2.55<sup>**</sup><span class="ci">[2.15, 2.95]</span></td><td class="key">354.2<sup>***</sup><span class="ci">[314.5, 393.8]</span></td><td class="key">0.103<sup>**</sup><span class="ci">[0.070, 0.136]</span></td><td><strong>1.41</strong><sup>**</sup><span class="ci">[1.33, 1.49]</span></td><td>1.09<span class="ci">[0.88, 1.30]</span></td><td><strong>1.83</strong><sup>*</sup><span class="ci">[1.62, 2.04]</span></td></tr>
-      <tr><th scope="row">HOCBF CMDP (C0)</th><td>3.72<span class="ci">[2.21, 5.24]</span></td><td>222.6<span class="ci">[57.2, 387.9]</span></td><td>0.038<span class="ci">[−0.012, 0.089]</span></td><td>2.20<span class="ci">[1.61, 2.78]</span></td><td>1.89<span class="ci">[−0.73, 4.52]</span></td><td>5.34<span class="ci">[0.86, 9.83]</span></td></tr>
     </tbody>
   </table>
 </div>
@@ -246,7 +244,6 @@ corrections.
       <tr><th scope="row">Nominal PPO (A1)</th><td>0.30<span class="ci">[0.22, 0.38]</span></td><td>0.62<span class="ci">[0.40, 0.84]</span></td><td>0.308<span class="ci">[0.108, 0.508]</span></td><td>699.9<span class="ci">[600.9, 799.0]</span></td><td>0.754<span class="ci">[0.697, 0.810]</span></td><td>1.94<span class="ci">[1.59, 2.29]</span></td><td>2.13<span class="ci">[1.23, 3.03]</span></td><td>6.17<span class="ci">[5.09, 7.25]</span></td></tr>
       <tr><th scope="row">HOCBF State-Cost (B1)</th><td>0.28<span class="ci">[0.26, 0.31]</span></td><td>0.37<span class="ci">[0.34, 0.40]</span></td><td>0.210<span class="ci">[0.166, 0.253]</span></td><td><strong>814.4</strong><span class="ci">[800.7, 828.0]</span></td><td>0.766<span class="ci">[0.745, 0.786]</span></td><td>1.67<span class="ci">[1.56, 1.78]</span></td><td><strong>1.00</strong><span class="ci">[0.93, 1.07]</span></td><td>7.85<span class="ci">[5.60, 10.10]</span></td></tr>
       <tr><th scope="row">HOCBF Actor-Loss (B2)</th><td>0.24<span class="ci">[0.21, 0.27]</span></td><td class="key">0.23<sup>*</sup><span class="ci">[0.21, 0.24]</span></td><td class="key">0.063<span class="ci">[0.059, 0.066]</span></td><td>810.0<span class="ci">[788.7, 831.3]</span></td><td>0.797<span class="ci">[0.773, 0.821]</span></td><td><strong>1.50</strong><span class="ci">[1.44, 1.56]</span></td><td>1.29<span class="ci">[1.13, 1.44]</span></td><td><strong>4.34</strong><sup>*</sup><span class="ci">[4.09, 4.59]</span></td></tr>
-      <tr><th scope="row">HOCBF CMDP (C0)</th><td>0.24<span class="ci">[0.20, 0.28]</span></td><td>0.64<span class="ci">[0.04, 1.23]</span></td><td>0.347<span class="ci">[−0.126, 0.820]</span></td><td>732.0<span class="ci">[472.1, 992.0]</span></td><td><strong>0.800</strong><span class="ci">[0.767, 0.833]</span></td><td>1.91<span class="ci">[1.50, 2.31]</span></td><td>1.85<span class="ci">[−0.48, 4.19]</span></td><td>7.60<span class="ci">[3.19, 12.01]</span></td></tr>
     </tbody>
   </table>
 </div>
@@ -254,7 +251,7 @@ corrections.
 <p class="caption">Mean [95% CI]. <sup>*</sup>p &lt; 0.05, <sup>**</sup>p &lt; 0.01,
 <sup>***</sup>p &lt; 0.001, Holm-corrected against A1. Boxed values are the
 primary outcomes in Table II and reduced filter dependence in Table III; bold
-marks the best value in a column. Interv.: share of steps where the shield
+values are highlighted as in the paper. Interv.: share of steps where the shield
 changed the action. Corr.: size of its correction. Speed and lateral errors are
 in m/s and m.</p>
 

@@ -103,3 +103,30 @@ table.results .ci {
   display: block;
   overflow-x: auto;
 }
+
+.code-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.code-link .button {
+  display: inline-block;
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  background: #24292f;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.code-link .button:hover {
+  background: #3a4148;
+  color: #ffffff;
+  text-decoration: none;
+}
+
+.code-link span {
+  color: #828282;
+  font-size: 0.9rem;
+}

@@ -3,9 +3,10 @@ layout: page
 title: Documentation
 ---
 
+<p class="code-link"><a class="button" href="https://github.com/AhmadAssaad711/safeRL">View the code on GitHub</a> <span>github.com/AhmadAssaad711/safeRL</span></p>
+
 A guide to the work and the code behind this site. The full, maintained
-documentation lives in the
-[repository](https://github.com/AhmadAssaad711/safeRL).
+documentation lives in the repository.
 
 - [The problem](#the-problem)
 - [Environment](#environment)
@@ -129,22 +130,9 @@ r = ε / (ε + wx·cx + wy·cy + wf·cf + way·cay)
 | A1 | `ppo_nominal` | No | None: the reward above only |
 | B1 | `ppo_hocbf_state_cost_raw` | No | A fixed state-cost penalty, built from the barrier, added to the reward |
 | B2 | `ppo_cbf_nd_reward_actor` | Yes, hard shield | A reward penalty, plus an actor loss pulling the policy toward the shield's safe action |
-| C0 | `ppo_cmdp_collision` | No | Constrained PPO: a Lagrange multiplier keeps an episodic collision cost under a budget |
-| C1 | `ppo_cbf_diff_reward_only` | Yes, differentiable projection | A reward penalty; gradients flow through the projection |
-| C2 | `ppo_cbf_projected` | Yes, differentiable projection | A reward penalty, plus an actor loss on the projected action |
 
-The policies form a ladder: A1 never sees the barrier, and B1 sees it only as
-a cost. B2 learns from the shield's corrections, while C1 and C2 put the
-projection inside the policy itself. C0 is the constrained-RL baseline: it
-learns from collisions as a budgeted cost rather than from the barrier.
-
-The results tables compare A1, B1, B2 and C0. C1 and C2 appear in the videos
-and robustness plots.
-
-C1 and C2 project their own action even with the external shield off. Their
-CBF-OFF results therefore bypass that internal projection and use the raw
-actor output, so that every policy's CBF-OFF number measures the network
-alone.
+The policies form a ladder: A1 never sees the barrier, B1 sees it only as a
+cost in its reward, and B2 learns directly from the shield's corrections.
 
 ## Training
 
@@ -156,7 +144,7 @@ alone.
 | Rollouts | 20 parallel environments sharing a 1,000-step rollout (50 steps each) |
 | Budget | 1,000,000 timesteps per policy and seed |
 | Seeds | 307, 327, 347, 367, 387, 407, 427 |
-| Actor-loss weight | λ = 1.0 for B2 and C2 |
+| Actor-loss weight | λ = 1.0 for B2 |
 
 The seeds are spaced by 20 because each run's 20 environments use seeds `s`
 to `s + 19`. Closer seeds would share traffic scenarios and would not be
@@ -217,8 +205,7 @@ S(t) = min over constraints i of [ b_i(t) − A_i(t) · u_raw(t) ]
 
 Above zero, the raw action satisfies every safety constraint. Below zero, at
 least one is violated and a shield would have to step in. The curves are
-means over seven rollouts per policy. C1 and C2 are measured on their raw
-actor output, so the margin reflects the network rather than its projection. A
+means over seven rollouts per policy. A
 rollout stops contributing after it crashes, so a curve that ends early means
 no rollout of that policy was still running.
 
@@ -229,16 +216,18 @@ Run from `safeRL_workspace`. Each script documents its options under
 
 | Output | Command |
 | --- | --- |
-| Five policies × seven seeds | `python -m scripts.ops.run_safety_matrix_study` |
-| B2 and C2 at λ = 1.0 | `... run_safety_matrix_study --only B2_cbf_nd_reward_actor C2_cbf_projected --actor-lambda 1.0` |
-| Results tables | `python -m scripts.reporting.build_final_variant_comparison_tables` |
+| A1, B1 and B2 × seven seeds | `python -m scripts.ops.run_safety_matrix_study --only A1_nominal B1_state_cost_raw B2_cbf_nd_reward_actor` |
+| B2 at λ = 1.0 | `... run_safety_matrix_study --only B2_cbf_nd_reward_actor --actor-lambda 1.0` |
 | Robustness plots | `python -m scripts.reporting.plot_hocbf_margin_aggregate` |
 | Highway GIFs | `python -m scripts.rendering.render_policy_traffic_gifs` |
 | Scenario GIFs | `python -m scripts.rendering.render_scenario_policy_gifs` |
 
-The full study is 35 training runs; add `--dry-run` to print the plan first.
+The three policies are 21 training runs; add `--dry-run` to print the plan first.
 
 ## The code
+
+All the code is in the **[safeRL repository on GitHub](https://github.com/AhmadAssaad711/safeRL)**. Paths below are
+relative to its root.
 
 | Part | Where |
 | --- | --- |
@@ -262,6 +251,6 @@ The full study is 35 training runs; add `--dry-run` to print the plan first.
 - [Diagnostic scenarios](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/diagnostic_scenarios.md):
   the fixed scenes and the counterfactual protocol.
 - [Trial log](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/experiments/trial_log.md):
-  every trial after the five-policy study, with verdicts.
+  every trial after the main study, with verdicts.
 - [Documentation index](https://github.com/AhmadAssaad711/safeRL/blob/main/safeRL_workspace/docs/README.md):
   all other studies and notes.
