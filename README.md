@@ -38,8 +38,8 @@ about safety. This study separates the two:
 - **CBF-ON** measures the policy plus the deployed HOCBF shield.
 
 The policies differ only in how safety information reaches training: not at
-all, through a reward penalty, through an actor loss built from the shield's
-output, or through a differentiable projection inside the policy. A policy
+all, through a reward penalty built from the barrier, or through an actor
+loss built from the shield's output. A policy
 that has internalized safety should stay safe with the shield off, not only
 with it on.
 
@@ -61,7 +61,7 @@ choose any lateral position.
 
 **Observation width.** The width is derived, not fixed:
 `(1 + neighbors_count) * 5 + 2`. The canonical notebook contract uses five
-neighbor rows (32D). The five-policy study reported on the project page uses
+neighbor rows (32D). The study reported on the project page uses
 seven neighbor rows and drops the constant ego desired-speed slot (41D).
 Always state `neighbors_count` with an observation width.
 
@@ -135,23 +135,14 @@ in the [experiment contract](safeRL_workspace/docs/lanelessKaralakou_reference.m
 | A1 | `ppo_nominal` | No | None: the nominal reward only |
 | B1 | `ppo_hocbf_state_cost_raw` | No | Fixed barrier-based state-cost penalty in the reward |
 | B2 | `ppo_cbf_nd_reward_actor` | Yes, hard shield | Reward penalty plus a detached actor loss toward the shield's safe action |
-| C1 | `ppo_cbf_diff_reward_only` | Yes, differentiable projection | Reward penalty; gradients flow through the projection |
-| C2 | `ppo_cbf_projected` | Yes, differentiable projection | Reward penalty plus an actor loss on the projected mean |
 
-C1 and C2 carry their projection inside the policy, so their deployed action
-is projected even under CBF-OFF. Their CBF-OFF results therefore use the raw
-actor mean with the projection bypassed, the only evaluation comparable to
-the other policies.
-
-The later constrained-RL (CMDP) work reassigns these letters: C1 and C2 become
-D1 and D2, and C1/C2 name the new CMDP policies. See the
-[CMDP implementation notes](safeRL_workspace/docs/cmdp_implementation_notes.md).
-This README and the project page use the letters above.
+The policies form a ladder: A1 never sees the barrier, B1 sees it only as a
+cost in its reward, and B2 learns directly from the shield's corrections.
 
 ## Training and evaluation
 
-The five-policy study (`scripts/ops/run_safety_matrix_study.py`) trains every
-policy the same way:
+The study (`scripts/ops/run_safety_matrix_study.py`) trains every policy the
+same way:
 
 | Setting | Value |
 | --- | --- |
@@ -163,7 +154,7 @@ policy the same way:
 | Seeds | 307, 327, 347, 367, 387, 407, 427 |
 | Observation | 41D: seven neighbor rows, ego desired-speed slot dropped |
 | CBF rows | At most seven neighbor constraints plus the road edges |
-| Actor-loss weight | λ = 1.0 for B2 and C2 in the reported tables (a follow-up to the base study's 0.1) |
+| Actor-loss weight | λ = 1.0 for B2 in the reported tables (a follow-up to the base study's 0.1) |
 
 The seeds are spaced by 20, the number of parallel environments. Worker seeds
 are `s` to `s + 19`, so seeds closer than 20 apart would share scenario
@@ -188,14 +179,27 @@ without a collision within 3,000 policy steps; a collision ends the episode.
 | Lateral tracking error | Mean distance from the lateral target (m) |
 | Mean jerk norm | Mean size of the change in applied acceleration |
 
-Each seed's 200 episodes give one value per KPI; tables report the mean and
-standard deviation across the seven seeds.
+Each seed's 200 episodes give one value per KPI. Tables report the mean over
+seeds with a 95% confidence interval, and test each policy against A1 with a
+Holm correction for multiple comparisons.
 
 ## Results
 
-Results, rollout videos and robustness plots are on the
-[project page](https://ahmadassaad711.github.io/safeRL/). The two results
-tables (CBF-OFF and CBF-ON, all eleven KPIs) are built from the run outputs by:
+Headline results, mean with 95% confidence interval. Significance is
+Holm-corrected against A1: \* p < 0.05, \*\* p < 0.01, \*\*\* p < 0.001.
+
+| Policy | CBF-OFF coll./km ↓ | CBF-OFF completion ↑ | CBF-OFF return ↑ | CBF-ON coll./km ↓ | CBF-ON intervention ↓ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A1, nominal PPO | 4.04 [3.33, 4.74] | 0.036 [0.019, 0.053] | 208.5 [159.1, 258.0] | 0.30 [0.22, 0.38] | 0.62 [0.40, 0.84] |
+| B1, HOCBF state cost | 3.74 [3.27, 4.22] | 0.056 [0.027, 0.085] | 259.2 [232.4, 286.0] | 0.28 [0.26, 0.31] | 0.37 [0.34, 0.40] |
+| B2, HOCBF actor loss | **2.55\*\*** [2.15, 2.95] | **0.103\*\*** [0.070, 0.136] | **354.2\*\*\*** [314.5, 393.8] | 0.24 [0.21, 0.27] | **0.23\*** [0.21, 0.24] |
+
+Without the shield, only B2 is significantly safer than nominal PPO. With the
+shield on, all three reach 0.24–0.30 collisions per km, but the shield
+intervenes on far fewer of B2's steps. The full tables (every KPI), rollout
+videos and robustness plots are on the
+[project page](https://ahmadassaad711.github.io/safeRL/). The tables are built
+from the run outputs by:
 
 ```bash
 python -m scripts.reporting.build_final_variant_comparison_tables
@@ -280,25 +284,23 @@ covers every module.
 
 ## Reproducing the study
 
-The full study is 35 training runs of 1,000,000 timesteps each. Use
+The three policies are 21 training runs of 1,000,000 timesteps each. Use
 `--dry-run` first to print the commands without running them.
 
 ```bash
 cd safeRL_workspace
-python -m scripts.ops.run_safety_matrix_study --dry-run --out-base <output-dir>
-```
-
-The base study runs B2 and C2 at λ = 0.1. The reported B2 and C2 results use
-λ = 1.0, which is a separate run of those two policies:
-
-```bash
 python -m scripts.ops.run_safety_matrix_study --dry-run --out-base <output-dir> \
-    --only B2_cbf_nd_reward_actor C2_cbf_projected --actor-lambda 1.0
+    --only A1_nominal B1_state_cost_raw
+python -m scripts.ops.run_safety_matrix_study --dry-run --out-base <output-dir> \
+    --only B2_cbf_nd_reward_actor --actor-lambda 1.0
 ```
+
+The launcher's default actor-loss weight is λ = 0.1; the reported B2 results
+use λ = 1.0, hence the second command.
 
 | Output | Module |
 | --- | --- |
-| Five policies × seven seeds | `scripts.ops.run_safety_matrix_study` |
+| A1, B1 and B2 × seven seeds | `scripts.ops.run_safety_matrix_study` |
 | Results tables | `scripts.reporting.build_final_variant_comparison_tables` |
 | Robustness (HOCBF margin) plots | `scripts.reporting.plot_hocbf_margin_aggregate` |
 | Highway rollout GIFs | `scripts.rendering.render_policy_traffic_gifs` |
@@ -331,8 +333,7 @@ repository rules in `AGENTS.md`.
 | [Diagnostic scenarios](safeRL_workspace/docs/diagnostic_scenarios.md) | The fixed scenes behind the scenario videos and plots |
 | [CBF factorial ablation](safeRL_workspace/docs/cbf_factorial_ablation.md) | Separating policy occupancy from same-state action effects |
 | [HOCBF reward investigation](safeRL_workspace/docs/hocbf_reward_investigation.md) | HOCBF-based reward terms |
-| [CMDP implementation notes](safeRL_workspace/docs/cmdp_implementation_notes.md) | The constrained-RL policies |
-| [Trial log](safeRL_workspace/docs/experiments/trial_log.md) | Every trial after the five-policy study, with verdicts |
+| [Trial log](safeRL_workspace/docs/experiments/trial_log.md) | Every trial after the main study, with verdicts |
 | [Documentation index](safeRL_workspace/docs/README.md) | All other studies and handoff notes |
 
 ## Contributing

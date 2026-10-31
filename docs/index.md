@@ -7,6 +7,8 @@ title: Home
 
 <!-- TODO: paper title, authors, venue, and PDF link. -->
 
+<p class="code-link"><a class="button" href="https://github.com/AhmadAssaad711/safeRL">View the code on GitHub</a> <span>github.com/AhmadAssaad711/safeRL</span></p>
+
 ## Overview
 
 A PPO agent drives on a lane-free highway: a periodic 380 m by 10.2 m road
@@ -22,20 +24,18 @@ The study separates what the policy learns from what the shield supplies:
 
 ## Policies compared
 
-| Label | Variant | How safety enters training |
-| --- | --- | --- |
-| A1 | `ppo_nominal` | None: the nominal reward only |
-| B1 | `ppo_hocbf_state_cost_raw` | Fixed state-cost penalty in the reward |
-| B2 | `ppo_cbf_nd_reward_actor` | Direct geometric actor loss, HOCBF-filtered training |
-| C1 | `ppo_cbf_diff_reward_only` | Differentiable projection plus reward |
-| C2 | `ppo_cbf_projected` | Differentiable projection plus actor loss |
+| Label | Policy | Variant | How safety enters training |
+| --- | --- | --- | --- |
+| A1 | Nominal PPO | `ppo_nominal` | None: the nominal reward only |
+| B1 | HOCBF State-Cost | `ppo_hocbf_state_cost_raw` | Fixed HOCBF state-cost penalty in the reward; trained without the shield |
+| B2 | HOCBF Actor-Loss | `ppo_cbf_nd_reward_actor` | Actor loss toward the shield's safe action, with the shield in training |
 
 ## On the highway
 
 Each policy driving in the full 40-vehicle traffic. The ego vehicle is
 green. The left clip has the shield off (CBF-OFF) and the right clip has it on
-(CBF-ON). A clip stops when its episode ends, so a shorter clip is an episode
-that ended early.
+(CBF-ON). In these videos a collision does not end the episode: it is counted,
+and the vehicles stay on the road and keep driving.
 
 <div class="clip-grid">
   <div></div><div class="head">CBF-OFF</div><div class="head">CBF-ON</div>
@@ -45,16 +45,17 @@ that ended early.
   <div class="arm">B1</div>
   <img src="media/full_road/b1_cbf_off.gif" alt="B1 rollout, full highway traffic, CBF-OFF">
   <img src="media/full_road/b1_cbf_on.gif" alt="B1 rollout, full highway traffic, CBF-ON">
-  <div class="arm">C1</div>
-  <img src="media/full_road/c1_cbf_off.gif" alt="C1 rollout, full highway traffic, CBF-OFF">
-  <img src="media/full_road/c1_cbf_on.gif" alt="C1 rollout, full highway traffic, CBF-ON">
+  <div class="arm">B2</div>
+  <img src="media/full_road/b2_cbf_off.gif" alt="B2 rollout, full highway traffic, CBF-OFF">
+  <img src="media/full_road/b2_cbf_on.gif" alt="B2 rollout, full highway traffic, CBF-ON">
 </div>
 
 ## Scenarios
 
 Fixed diagnostic scenes that each test one driving decision. Every policy
 starts from the same scene, with the shield off and on. The camera follows the
-green ego vehicle.
+green ego vehicle. As on the highway, a collision is counted but does not end
+the episode, so every clip runs the same length.
 
 ### Open passing gap
 
@@ -204,39 +205,55 @@ means no rollout of that policy was still running.
 
 ## Results
 
-Every policy is trained with seven seeds (307 to 427 in steps of 20) and
-evaluated over 200 episodes per seed in each mode. Values are the mean and
-standard deviation across the seven seed means. B2 and C2 are shown at
-λ = 1.0, the best setting found. An episode completes only if it covers
-1,000 m without a collision within 3,000 policy steps.
+Every policy is evaluated twice: with the shield off (CBF-OFF, the policy
+alone) and on (CBF-ON, the policy plus the deployed HOCBF shield). An episode
+completes only if the ego covers 1,000 m without a collision within 3,000
+policy steps; in these evaluations a collision ends the episode. Entries are
+means with 95% confidence intervals.
 
-*The numbers are pending and will be filled in from the exported tables.*
+**Without the shield, only B2 is significantly safer than nominal PPO**: 2.55
+against 4.04 collisions per km (p < 0.01), with higher return and nearly three
+times the completion rate. **With the shield on, every policy lands at
+0.24–0.30 collisions per km**, but B2 leans on it least: the shield intervenes
+on 23% of its steps against 62% for A1 (p < 0.05), with the smallest
+corrections.
 
-### Table 1: CBF-OFF, the policy alone
+### Table II: CBF-OFF evaluation
 
-No shield at deployment. C1 and C2 carry an internal projection layer, so
-their CBF-OFF results bypass it and use the raw actor mean.
+<div class="table-wrap">
+  <table class="results">
+    <thead>
+      <tr><th>Policy</th><th>Coll./km ↓</th><th>Return ↑</th><th>Completion ↑</th><th>Speed err. ↓</th><th>Lat. err. ↓</th><th>Jerk ↓</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Nominal PPO (A1)</th><td>4.04<span class="ci">[3.33, 4.74]</span></td><td>208.5<span class="ci">[159.1, 258.0]</span></td><td>0.036<span class="ci">[0.019, 0.053]</span></td><td>2.07<span class="ci">[1.82, 2.32]</span></td><td>1.99<span class="ci">[1.09, 2.90]</span></td><td>3.44<span class="ci">[2.43, 4.46]</span></td></tr>
+      <tr><th scope="row">HOCBF State-Cost (B1)</th><td>3.74<span class="ci">[3.27, 4.22]</span></td><td>259.2<span class="ci">[232.4, 286.0]</span></td><td>0.056<span class="ci">[0.027, 0.085]</span></td><td>1.76<span class="ci">[1.45, 2.07]</span></td><td><strong>0.84</strong><span class="ci">[0.78, 0.90]</span></td><td>4.45<span class="ci">[2.40, 6.50]</span></td></tr>
+      <tr><th scope="row">HOCBF Actor-Loss (B2)</th><td class="key">2.55<sup>**</sup><span class="ci">[2.15, 2.95]</span></td><td class="key">354.2<sup>***</sup><span class="ci">[314.5, 393.8]</span></td><td class="key">0.103<sup>**</sup><span class="ci">[0.070, 0.136]</span></td><td><strong>1.41</strong><sup>**</sup><span class="ci">[1.33, 1.49]</span></td><td>1.09<span class="ci">[0.88, 1.30]</span></td><td><strong>1.83</strong><sup>*</sup><span class="ci">[1.62, 2.04]</span></td></tr>
+    </tbody>
+  </table>
+</div>
 
-| Policy | Collisions / km | Completion rate | Minimum h | Intervention rate | Episode return |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| A1 | – | – | – | – | – |
-| B1 | – | – | – | – | – |
-| B2 | – | – | – | – | – |
-| C1 | – | – | – | – | – |
-| C2 | – | – | – | – | – |
+### Table III: CBF-ON evaluation
 
-### Table 2: CBF-ON, the policy with the shield
+<div class="table-wrap">
+  <table class="results">
+    <thead>
+      <tr><th>Policy</th><th>Coll./km ↓</th><th>Interv. ↓</th><th>Corr. ↓</th><th>Return ↑</th><th>Completion ↑</th><th>Speed err. ↓</th><th>Lat. err. ↓</th><th>Jerk ↓</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Nominal PPO (A1)</th><td>0.30<span class="ci">[0.22, 0.38]</span></td><td>0.62<span class="ci">[0.40, 0.84]</span></td><td>0.308<span class="ci">[0.108, 0.508]</span></td><td>699.9<span class="ci">[600.9, 799.0]</span></td><td>0.754<span class="ci">[0.697, 0.810]</span></td><td>1.94<span class="ci">[1.59, 2.29]</span></td><td>2.13<span class="ci">[1.23, 3.03]</span></td><td>6.17<span class="ci">[5.09, 7.25]</span></td></tr>
+      <tr><th scope="row">HOCBF State-Cost (B1)</th><td>0.28<span class="ci">[0.26, 0.31]</span></td><td>0.37<span class="ci">[0.34, 0.40]</span></td><td>0.210<span class="ci">[0.166, 0.253]</span></td><td><strong>814.4</strong><span class="ci">[800.7, 828.0]</span></td><td>0.766<span class="ci">[0.745, 0.786]</span></td><td>1.67<span class="ci">[1.56, 1.78]</span></td><td><strong>1.00</strong><span class="ci">[0.93, 1.07]</span></td><td>7.85<span class="ci">[5.60, 10.10]</span></td></tr>
+      <tr><th scope="row">HOCBF Actor-Loss (B2)</th><td>0.24<span class="ci">[0.21, 0.27]</span></td><td class="key">0.23<sup>*</sup><span class="ci">[0.21, 0.24]</span></td><td class="key">0.063<span class="ci">[0.059, 0.066]</span></td><td>810.0<span class="ci">[788.7, 831.3]</span></td><td>0.797<span class="ci">[0.773, 0.821]</span></td><td><strong>1.50</strong><span class="ci">[1.44, 1.56]</span></td><td>1.29<span class="ci">[1.13, 1.44]</span></td><td><strong>4.34</strong><sup>*</sup><span class="ci">[4.09, 4.59]</span></td></tr>
+    </tbody>
+  </table>
+</div>
 
-The deployed HOCBF shield is active. For C1 and C2, the internal projection
-and the external shield both run.
-
-| Policy | Collisions / km | Completion rate | Minimum h | Intervention rate | Episode return |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| A1 | – | – | – | – | – |
-| B1 | – | – | – | – | – |
-| B2 | – | – | – | – | – |
-| C1 | – | – | – | – | – |
-| C2 | – | – | – | – | – |
+<p class="caption">Mean [95% CI]. <sup>*</sup>p &lt; 0.05, <sup>**</sup>p &lt; 0.01,
+<sup>***</sup>p &lt; 0.001, Holm-corrected against A1. Boxed values are the
+primary outcomes in Table II and reduced filter dependence in Table III; bold
+values are highlighted as in the paper. Interv.: share of steps where the shield
+changed the action. Corr.: size of its correction. Speed and lateral errors are
+in m/s and m.</p>
 
 ## Documentation
 
