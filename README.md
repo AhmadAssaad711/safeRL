@@ -198,15 +198,14 @@ Without the shield, only B2 is significantly safer than nominal PPO. With the
 shield on, all three reach 0.24–0.30 collisions per km, but the shield
 intervenes on far fewer of B2's steps. The full tables (every KPI), rollout
 videos and robustness plots are on the
-[project page](https://ahmadassaad711.github.io/safeRL/). The tables are built
-from the run outputs by:
+[project page](https://ahmadassaad711.github.io/safeRL/).
 
-```bash
-python -m scripts.reporting.build_final_variant_comparison_tables
-```
-
-Run outputs are not committed (see [artifacts/](artifacts/README.md)), so the
-tables are regenerated on the machine that holds the runs.
+Each run writes its per-seed KPIs to `post_train_200ep_kpis.csv`. Run outputs
+are not committed (see [artifacts/](artifacts/README.md)), so the tables are
+built on the machine that holds the runs. The confidence intervals and
+Holm-corrected tests in the paper are not yet produced by a committed script;
+`scripts.reporting.build_final_variant_comparison_tables` gives the per-seed
+mean ± SD summary of the same files.
 
 ## Repository layout
 
@@ -301,7 +300,7 @@ use λ = 1.0, hence the second command.
 | Output | Module |
 | --- | --- |
 | A1, B1 and B2 × seven seeds | `scripts.ops.run_safety_matrix_study` |
-| Results tables | `scripts.reporting.build_final_variant_comparison_tables` |
+| Per-seed KPI summary (mean ± SD) | `scripts.reporting.build_final_variant_comparison_tables` |
 | Robustness (HOCBF margin) plots | `scripts.reporting.plot_hocbf_margin_aggregate` |
 | Highway rollout GIFs | `scripts.rendering.render_policy_traffic_gifs` |
 | Scenario rollout GIFs | `scripts.rendering.render_scenario_policy_gifs` |
